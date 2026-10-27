@@ -93,6 +93,16 @@ function Obtenir-ConfigParDefaut {
         # 27/10/2026 : "Sombre" ou "Claire" - memorise le choix de theme de Tomyn d'une
         # session a l'autre.
         Theme          = "Sombre"
+        # 27/10/2026 : demande de Tomyn - le seuil de detection "piece pas vraiment en
+        # contact" (voir Test-PiecesEnContact) etait fige a 0.3mm en dur. Certaines figurines
+        # ont des pieces volontairement tres rapprochees (aimants, charnieres, encoches) qui
+        # declenchaient l'avertissement a tort. Reglable depuis l'interface desormais, 0.3mm
+        # reste la valeur par defaut (largeur de buse habituelle ~0.4mm, voir le commentaire
+        # original a Test-PiecesEnContact).
+        SeuilContactMm = 0.3
+        # 27/10/2026 : demande de Tomyn - "reprise intelligente" (voir Lancer-Traitement),
+        # activee par defaut.
+        SauterDejaTraitees = $true
     }
 }
 
@@ -1249,6 +1259,21 @@ $caseOrientation.ForeColor = $THEME.Texte
 $caseOrientation.Checked = $false
 $form.Controls.Add($caseOrientation)
 
+# 27/10/2026 : demande de Tomyn - "reprise intelligente" (voir le filtrage dans
+# Lancer-Traitement) : coche par defaut, decochable pour forcer un retraitement complet meme
+# si la sortie semble deja a jour (ex: pour re-tester apres un correctif du script lui-meme).
+$caseSauterDejaTraitees = New-Object System.Windows.Forms.CheckBox
+$caseSauterDejaTraitees.Text = "Sauter les figurines deja traitees (sortie plus recente que les pieces)"
+$caseSauterDejaTraitees.Location = New-Object System.Drawing.Point(710, 217)
+$caseSauterDejaTraitees.Size = New-Object System.Drawing.Size(420, 24)
+$caseSauterDejaTraitees.ForeColor = $THEME.Texte
+$caseSauterDejaTraitees.Checked = [bool]$script:Config.SauterDejaTraitees
+$caseSauterDejaTraitees.Add_CheckedChanged({
+    $script:Config.SauterDejaTraitees = $caseSauterDejaTraitees.Checked
+    Sauver-Config
+})
+$form.Controls.Add($caseSauterDejaTraitees)
+
 # 27/10/2026 : sur un gros lot, inutile de tout relancer si seulement 1 ou 2 figurines ont
 # echoue - ce bouton ne relance que celles dont le statut indique un echec/erreur.
 $boutonRelancerEchecs = New-Object System.Windows.Forms.Button
@@ -1274,6 +1299,27 @@ $boutonNettoyerTemp.ForeColor = $THEME.Texte
 $boutonNettoyerTemp.FlatStyle = "Flat"
 $form.Controls.Add($boutonNettoyerTemp)
 Arrondir-Bouton $boutonNettoyerTemp
+
+# 27/10/2026 : demande de Tomyn - seuil de "piece pas vraiment en contact" (voir
+# Test-PiecesEnContact) reglable depuis l'interface au lieu d'etre fige a 0.3mm en dur.
+# Certaines figurines ont des pieces volontairement tres rapprochees (aimants, charnieres,
+# encoches) qui declenchaient l'avertissement a tort avec une valeur unique pour tout le monde.
+[void](Creer-Label "Seuil contact (mm) :" 486 224)
+$champSeuilContact = New-Object System.Windows.Forms.NumericUpDown
+$champSeuilContact.Location = New-Object System.Drawing.Point(486, 244)
+$champSeuilContact.Size = New-Object System.Drawing.Size(70, 24)
+$champSeuilContact.DecimalPlaces = 2
+$champSeuilContact.Increment = 0.1
+$champSeuilContact.Minimum = 0.0
+$champSeuilContact.Maximum = 10.0
+$champSeuilContact.BackColor = $THEME.FondChamp
+$champSeuilContact.ForeColor = $THEME.Texte
+$champSeuilContact.Value = [Math]::Max(0.0, [Math]::Min(10.0, [double]$script:Config.SeuilContactMm))
+$champSeuilContact.Add_ValueChanged({
+    $script:Config.SeuilContactMm = [double]$champSeuilContact.Value
+    Sauver-Config
+})
+$form.Controls.Add($champSeuilContact)
 $boutonNettoyerTemp.Add_Click({
     $dossiersTemp = Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -Directory -Filter "fusionfig_*" -ErrorAction SilentlyContinue
     if (-not $dossiersTemp -or $dossiersTemp.Count -eq 0) {
@@ -2157,7 +2203,7 @@ function Test-PiecesEnContact([object[]]$pointsA, [object[]]$pointsB, [double]$s
 # ============================================================================
 # TRAITEMENT D'UNE FIGURINE
 # ============================================================================
-function Traiter-UneFigurineCore([string]$nomFigurine, [string[]]$cheminsPieces, [string]$dossierSortie, [string]$cheminBambuExe, [bool]$orientationAuto, [hashtable]$etatAnnulation = $null, [datetime]$heureEnvoi = (Get-Date)) {
+function Traiter-UneFigurineCore([string]$nomFigurine, [string[]]$cheminsPieces, [string]$dossierSortie, [string]$cheminBambuExe, [bool]$orientationAuto, [hashtable]$etatAnnulation = $null, [datetime]$heureEnvoi = (Get-Date), [double]$seuilContactMm = 0.3) {
     # 27/10/2026 : Tomyn a releve ~30s d'ecart entre "Demarrage" (cote UI, juste apres
     # BeginInvoke) et la premiere ligne reellement ecrite par cette fonction, alors que la
     # fusion locale + Bambu Studio ne prennent que quelques secondes une fois mesures separement
@@ -2324,7 +2370,9 @@ function Traiter-UneFigurineCore([string]$nomFigurine, [string[]]$cheminsPieces,
         # une heuristique basee sur un echantillon de points, pas une garantie absolue - une
         # piece designee expres pour etre separee (encoche d'aimant, etc.) declenchera aussi
         # ce message a tort.
-        $seuilContactMm = 0.3
+        # 27/10/2026 : desormais reglable depuis l'interface (voir $champSeuilContact) au lieu
+        # d'etre fige ici - recupere via le parametre $seuilContactMm transmis au runspace
+        # (cette fonction tourne dans une session isolee, sans acces a $script:Config).
         for ($i = 0; $i -lt $boitesParPiece.Count; $i++) {
             $enContactAvecUneAutre = $false
             for ($j = 0; $j -lt $boitesParPiece.Count; $j++) {
@@ -2534,6 +2582,54 @@ function Lancer-Traitement([array]$cibles) {
     $dossierSortie = $champSortie.Text
     $orientationAuto = $caseOrientation.Checked
 
+    # 27/10/2026 : demande de Tomyn - "reprise intelligente" : si on relance un lot qui a deja
+    # ete traite en partie (ex: figurines ajoutees au dossier source apres un premier passage),
+    # on sautait jusqu'ici TOUT refaire depuis zero, pieces deja fusionnees comprises. On sautera
+    # desormais une figurine si sa sortie (.stl ET .3mf) existe deja dans $dossierSortie et est
+    # PLUS RECENTE que toutes ses pieces source incluses - signe qu'elle n'a pas change depuis
+    # son dernier traitement reussi. Volontairement CONSERVATEUR : si des pieces ont ete exclues/
+    # reincluses (PiecesExclues non vide), on ne se fie pas aux dates (exclure une piece ne change
+    # pas sa date de modification) et on retraite systematiquement. Case decochable si Tomyn veut
+    # forcer un retraitement complet malgre tout.
+    if ($caseSauterDejaTraitees.Checked) {
+        $ciblesFiltrees = [System.Collections.Generic.List[object]]::new()
+        $nbSautees = 0
+        foreach ($grp in $cibles) {
+            $dejaTraitee = $false
+            $aDesExclusions = $grp.PSObject.Properties['PiecesExclues'] -and $grp.PiecesExclues.Count -gt 0
+            if (-not $aDesExclusions) {
+                $cheminStlAttendu = Join-Path $dossierSortie "$($grp.Nom).stl"
+                $chemin3mfAttendu = Join-Path $dossierSortie "$($grp.Nom).3mf"
+                if ((Test-Path $cheminStlAttendu) -and (Test-Path $chemin3mfAttendu)) {
+                    $dateSortie = [System.IO.File]::GetLastWriteTimeUtc($cheminStlAttendu)
+                    # 27/10/2026 : CORRECTIF - $grp.Pieces vient du scan initial (boutonScanner),
+                    # ses objets FileInfo gardent la date de modification figee a CE moment-la.
+                    # Si Tomyn modifie une piece APRES le scan mais AVANT de lancer le traitement,
+                    # .LastWriteTimeUtc en cache reste l'ANCIENNE date et la figurine serait sautee
+                    # a tort (confirme par test_reprise_intelligente.ps1 en bac a sable). On relit
+                    # donc la date directement sur le disque ici plutot que de faire confiance au
+                    # cache de l'objet FileInfo.
+                    $dateSourcePlusRecente = ($grp.Pieces | ForEach-Object { [System.IO.File]::GetLastWriteTimeUtc($_.FullName) } | Measure-Object -Maximum).Maximum
+                    if ($dateSortie -ge $dateSourcePlusRecente) { $dejaTraitee = $true }
+                }
+            }
+            if ($dejaTraitee) {
+                $nbSautees++
+            } else {
+                $ciblesFiltrees.Add($grp)
+            }
+        }
+        if ($nbSautees -gt 0) {
+            Ajouter-Journal "Reprise intelligente : $nbSautees figurine(s) deja traitee(s) (sortie plus recente que les pieces source) sautee(s) - decoche 'Sauter les figurines deja traitees' pour forcer un retraitement complet."
+        }
+        $cibles = @($ciblesFiltrees)
+        if ($cibles.Count -eq 0) {
+            Ajouter-Journal "Rien a traiter - toutes les figurines selectionnees sont deja a jour."
+            [System.Windows.Forms.MessageBox]::Show("Toutes les figurines selectionnees sont deja a jour (sortie plus recente que les pieces source).`n`nDecoche 'Sauter les figurines deja traitees' pour forcer un retraitement complet.", "Fusion figurines")
+            return
+        }
+    }
+
     # 27/10/2026 : demande de Tomyn - jusqu'ici, Bambu Studio deja ouvert en arriere-plan ne
     # se decouvrait qu'APRES l'echec (stdout/stderr vides, voir le message de diagnostic dans
     # Traiter-UneFigurineCore) - on le detecte maintenant AVANT de lancer quoi que ce soit.
@@ -2701,7 +2797,7 @@ function Demarrer-ProchainTraitement([string]$dossierSortie, [string]$cheminBamb
     # CE runspace (session isolee, voir le commentaire juste au-dessus) : "Test-PiecesEnContact
     # n'est pas reconnu..." a chaque traitement, decouvert par Tomyn sur le fidget toy.
     $defTestPiecesEnContact = (Get-Item function:Test-PiecesEnContact).Definition
-    $scriptTexte = 'param($NomFigurine, $CheminsPieces, $DossierSortie, $CheminBambuExe, $OrientationAuto, $EtatAnnulation, $HeureEnvoi)' + "`r`n" +
+    $scriptTexte = 'param($NomFigurine, $CheminsPieces, $DossierSortie, $CheminBambuExe, $OrientationAuto, $EtatAnnulation, $HeureEnvoi, $SeuilContactMm)' + "`r`n" +
         'function Appliquer-Transform3MF {' + "`r`n" + $defAppliquerTransform + "`r`n" + '}' + "`r`n" +
         'function Appliquer-Transform3MF-Triangles {' + "`r`n" + $defAppliquerTransformTriangles + "`r`n" + '}' + "`r`n" +
         'function Lire-Document3MF {' + "`r`n" + $defLireDocument3MF + "`r`n" + '}' + "`r`n" +
@@ -2713,7 +2809,7 @@ function Demarrer-ProchainTraitement([string]$dossierSortie, [string]$cheminBamb
         'function Lire-TrianglesSTLEchantillon {' + "`r`n" + $defLireTrianglesEchantillon + "`r`n" + '}' + "`r`n" +
         'function Test-PiecesEnContact {' + "`r`n" + $defTestPiecesEnContact + "`r`n" + '}' + "`r`n" +
         'function Traiter-UneFigurineCore {' + "`r`n" + $defCore + "`r`n" + '}' + "`r`n" +
-        'Traiter-UneFigurineCore $NomFigurine $CheminsPieces $DossierSortie $CheminBambuExe $OrientationAuto $EtatAnnulation $HeureEnvoi'
+        'Traiter-UneFigurineCore $NomFigurine $CheminsPieces $DossierSortie $CheminBambuExe $OrientationAuto $EtatAnnulation $HeureEnvoi $SeuilContactMm'
 
     $rs = Obtenir-RunspacePartagee "fusion"
     $ps = [System.Management.Automation.PowerShell]::Create()
@@ -2728,7 +2824,11 @@ function Demarrer-ProchainTraitement([string]$dossierSortie, [string]$cheminBamb
     # script texte, JIT, etc.) ou d'autre chose, on transmet l'heure d'envoi et la fonction
     # logue elle-meme, en tout premier, le temps ecoule avant qu'elle ne commence vraiment.
     $heureEnvoiRunspace = Get-Date
-    [void]$ps.AddScript($scriptTexte).AddArgument($grp.Nom).AddArgument($cheminsPieces).AddArgument($dossierSortie).AddArgument($cheminBambuExe).AddArgument($orientationAuto).AddArgument($etatAnnulationPartage).AddArgument($heureEnvoiRunspace)
+    # 27/10/2026 : seuil de contact lu depuis la config (regle en direct par $champSeuilContact,
+    # voir sa creation plus haut) - transmis en argument puisque ce runspace n'a pas acces a
+    # $script:Config (session isolee, voir le commentaire sur $defCore plus haut).
+    $seuilContactMmActuel = [double]$script:Config.SeuilContactMm
+    [void]$ps.AddScript($scriptTexte).AddArgument($grp.Nom).AddArgument($cheminsPieces).AddArgument($dossierSortie).AddArgument($cheminBambuExe).AddArgument($orientationAuto).AddArgument($etatAnnulationPartage).AddArgument($heureEnvoiRunspace).AddArgument($seuilContactMmActuel)
     $resultatAsync = $ps.BeginInvoke()
     $debutFigurine = Get-Date
     # 27/10/2026 : variables LOCALES (pas $script:) - elles ne servent qu'au throttling du
