@@ -1516,6 +1516,11 @@ function Mettre-A-Jour-LigneGroupe($grp) {
             $texteTriangles = "{0:N0}" -f $grp.NombreTriangles
             if ($grp.NombreTriangles -ge $script:SeuilGrosMaillage) { $texteTriangles = "$texteTriangles !" }
             $item.SubItems[2].Text = $texteTriangles
+            # 28/10/2026 : la colonne "Statut" n'etait jamais rafraichie par cette fonction -
+            # necessaire pour que le statut "Deja a jour (sautee)" (reprise intelligente) soit
+            # visible immediatement dans le tableau, sans attendre une autre action qui
+            # redeclencherait un rafraichissement complet.
+            $item.SubItems[3].Text = $grp.Statut
             break
         }
     }
@@ -2544,6 +2549,10 @@ function Lancer-Traitement([array]$cibles) {
         [System.Windows.Forms.MessageBox]::Show("Rien a traiter - scanne d'abord un dossier.", "Fusion figurines")
         return
     }
+    # 28/10/2026 : figurines sautees par la "reprise intelligente" (voir plus bas) - gardees a
+    # part puis fusionnees dans $script:FigurinesCeLot juste apres sa (re)initialisation, pour
+    # qu'elles apparaissent elles aussi dans le rapport CSV de fin de lot.
+    $script:FigurinesSauteesCeLot = [System.Collections.Generic.List[object]]::new()
     # 26/10/2026 : garde-fou - empeche de lancer un DEUXIEME traitement par-dessus un premier
     # deja en cours dans CETTE MEME fenetre (ce qui ferait tourner 2 processus Bambu Studio +
     # 2 minuteurs en parallele, et donnerait un journal illisible avec des temps qui semblent
@@ -2615,6 +2624,18 @@ function Lancer-Traitement([array]$cibles) {
             }
             if ($dejaTraitee) {
                 $nbSautees++
+                # 28/10/2026 : CORRECTIF - une figurine sautee ici disparaissait purement et
+                # simplement : pas de statut mis a jour dans le tableau (la ligne gardait son
+                # ancien statut, potentiellement perime ou juste "En attente" pour toujours),
+                # et aucune trace dans le rapport CSV de fin de lot (seul un compte TOTAL
+                # apparaissait dans le journal, sans dire LESQUELLES). On met maintenant a jour
+                # son statut tout de suite (visible immediatement, pas besoin d'attendre la fin
+                # du lot) et on la garde a part pour l'ajouter au rapport CSV plus bas.
+                $grp.Statut = "Deja a jour (sautee)"
+                $grp.CheminSortieStl = $cheminStlAttendu
+                $grp.DureeSecondes = $null
+                Mettre-A-Jour-LigneGroupe $grp
+                $script:FigurinesSauteesCeLot.Add($grp)
             } else {
                 $ciblesFiltrees.Add($grp)
             }
@@ -2694,6 +2715,7 @@ function Lancer-Traitement([array]$cibles) {
     # 27/10/2026 : liste (dans l'ordre de traitement) utilisee pour ecrire le rapport CSV de
     # fin de lot - voir la fin de Demarrer-ProchainTraitement.
     $script:FigurinesCeLot = [System.Collections.Generic.List[object]]::new()
+    foreach ($g in $script:FigurinesSauteesCeLot) { $script:FigurinesCeLot.Add($g) }
     Ajouter-Journal "Orientation automatique : $(if ($orientationAuto) { 'activee (peut etre lent sur gros maillages)' } else { 'desactivee - a faire a la main dans Bambu Studio si besoin' })"
     Afficher-OverlayProgression "Preparation..."
     Demarrer-ProchainTraitement $dossierSortie $cheminBambuExe $orientationAuto
