@@ -85,6 +85,24 @@ function Arrondir-Bouton([System.Windows.Forms.Control]$bouton, [int]$rayon = 8)
 # ============================================================================
 $script:CheminConfig = Join-Path $PSScriptRoot "config-fusion-figurines.json"
 
+# 29/10/2026 : demande de Tomyn ("idee d'amelioration") - jusqu'ici Ajouter-Journal n'ecrivait
+# QUE dans la zone de texte de l'interface (RichTextBox en memoire) : un crash/gel de l'appli
+# pendant un gros lot (antivirus, Bambu Studio qui part en vrille, Windows qui redemarre tout
+# seul...) effacait TOUT l'historique avec elle, et le rapport CSV de fin de lot n'existe que
+# s'il reste de bout en bout. Un fichier .log sur disque survit a un crash et evite en plus de
+# devoir copier-coller la zone de texte a la main pour diagnostiquer un bug. Un fichier par
+# lancement de l'appli (horodate), dans un sous-dossier "logs" a cote du script.
+$script:DossierLogs = Join-Path $PSScriptRoot "logs"
+try {
+    if (-not (Test-Path $script:DossierLogs)) { New-Item -ItemType Directory -Path $script:DossierLogs -Force | Out-Null }
+    $script:CheminJournalFichier = Join-Path $script:DossierLogs "journal-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+} catch {
+    # Dossier logs inaccessible (droits, disque reseau en lecture seule...) : on degrade
+    # silencieusement vers la zone de texte seule plutot que de faire planter l'appli au
+    # demarrage pour ca.
+    $script:CheminJournalFichier = $null
+}
+
 function Obtenir-ConfigParDefaut {
     return [PSCustomObject]@{
         CheminBambuExe = "C:\Program Files\Bambu Studio\bambu-studio.exe"
@@ -1662,7 +1680,16 @@ $boutonExporterJournal.Add_Click({
 
 function Ajouter-Journal([string]$texte) {
     $horodatage = Get-Date -Format "HH:mm:ss"
-    $journal.AppendText("[$horodatage] $texte`r`n")
+    $ligne = "[$horodatage] $texte"
+    $journal.AppendText("$ligne`r`n")
+    # 29/10/2026 : persiste aussi sur disque (voir $script:CheminJournalFichier plus haut) -
+    # Add-Content ouvre/ferme le fichier a chaque appel plutot que de garder un handle ouvert,
+    # ce qui coute un peu plus cher par ligne mais garantit que rien n'est perdu si l'appli
+    # crashe juste apres (pas de buffer en memoire a vidanger qui ne le sera jamais).
+    if ($script:CheminJournalFichier) {
+        try { Add-Content -Path $script:CheminJournalFichier -Value $ligne -Encoding UTF8 -ErrorAction Stop }
+        catch { $script:CheminJournalFichier = $null }
+    }
 }
 
 # ============================================================================
@@ -3143,5 +3170,12 @@ $form.Add_FormClosing({
 # creation individuels ne posent pas eux-memes - evite de dupliquer cette logique partout.
 Repeindre-ControlesTheme $form.Controls
 
-$form.Add_Shown({ $form.Activate() })
+$form.Add_Shown({
+    $form.Activate()
+    if ($script:CheminJournalFichier) {
+        Ajouter-Journal "Journal egalement enregistre sur disque : $script:CheminJournalFichier"
+    } else {
+        Ajouter-Journal "ATTENTION : impossible de creer le fichier journal sur disque (dossier '$script:DossierLogs' inaccessible) - journal visible ici uniquement, perdu si l'appli crashe."
+    }
+})
 [System.Windows.Forms.Application]::Run($form)
