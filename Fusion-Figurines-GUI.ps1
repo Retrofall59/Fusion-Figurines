@@ -1828,6 +1828,12 @@ $boutonScanner.Add_Click({
 
     # CAS 2 - le dossier racine contient PLUSIEURS figurines, chacune dans son propre
     # sous-dossier (usage normal pour un lot).
+    # 29/10/2026 : demande de Tomyn - un sous-dossier avec 0 ou 1 .stl est ecarte ici SANS
+    # aucune trace dans le journal, impossible jusqu'ici de distinguer "normal, figurine a
+    # piece unique, rien a fusionner" de "louche, fichier manquant/mal copie". On garde la
+    # liste pour un recap en fin de scan plutot que d'avertir dossier par dossier (ca
+    # spammerait le journal dans un lot ou les pieces uniques sont frequentes et attendues).
+    $sousDossiersIgnores = [System.Collections.Generic.List[string]]::new()
     $sousDossiers = Get-ChildItem -Path $champRacine.Text -Directory
     foreach ($sd in $sousDossiers) {
         $pieces = Get-ChildItem -Path $sd.FullName -Filter "*.stl" -File
@@ -1835,6 +1841,8 @@ $boutonScanner.Add_Click({
             $script:Groupes += [PSCustomObject]@{
                 Nom = $sd.Name; Dossier = $sd.FullName; Pieces = $pieces; Statut = "En attente"; CheminSortieStl = $null; DureeSecondes = $null; PiecesExclues = @()
             }
+        } else {
+            $sousDossiersIgnores.Add("$($sd.Name) ($($pieces.Count) .stl)")
         }
     }
 
@@ -1886,6 +1894,9 @@ $boutonScanner.Add_Click({
     Rafraichir-ListeGroupes
     Remplir-ListePieces $null
     Ajouter-Journal "Scan termine : $($script:Groupes.Count) figurine(s) multi-pieces detectee(s) (sous-dossiers avec 2 .stl ou plus)."
+    if ($sousDossiersIgnores.Count -gt 0) {
+        Ajouter-Journal "$($sousDossiersIgnores.Count) sous-dossier(s) ignore(s) (0 ou 1 .stl, rien a fusionner) : $($sousDossiersIgnores -join ', ')"
+    }
 
     if ($figurinesVolumineuses.Count -gt 0) {
         Afficher-Toast "Maillage volumineux detecte :`r`n$($figurinesVolumineuses -join "`r`n")`r`n`r`nLaisse 'Orientation auto' decochee pour ces figurines (sinon ca peut prendre 10-25+ minutes chacune)."
