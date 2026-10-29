@@ -2629,6 +2629,22 @@ $script:FileTraitement = [System.Collections.Generic.Queue[object]]::new()
 # memoire, donc modifier son contenu (pas la variable elle-meme) est bien visible partout.
 $script:EtatTraitement = @{ EnCours = $null }
 
+# 29/10/2026 : demande de Tomyn - le renommage avant fusion (voir plus bas dans
+# Lancer-Traitement) proposait au depart le MEME nom deja pris comme valeur par defaut dans la
+# boite de dialogue, ce qui l'obligeait a taper un nom lui-meme a chaque fois. Cette fonction
+# propose maintenant automatiquement le prochain nom libre ("Nom (2)", "Nom (3)", etc., en
+# testant .stl ET .3mf a chaque fois) - Tomyn n'a plus qu'a valider, tout en gardant la
+# possibilite de taper autre chose dans la boite si ce nom automatique ne lui convient pas.
+function Obtenir-ProchainNomLibre([string]$nomBase, [string]$dossierSortie) {
+    $compteur = 2
+    $nomCandidat = $nomBase
+    while ((Test-Path (Join-Path $dossierSortie "$nomCandidat.stl")) -or (Test-Path (Join-Path $dossierSortie "$nomCandidat.3mf"))) {
+        $nomCandidat = "$nomBase ($compteur)"
+        $compteur++
+    }
+    return $nomCandidat
+}
+
 function Lancer-Traitement([array]$cibles) {
     if ($cibles.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("Rien a traiter - scanne d'abord un dossier.", "Fusion figurines")
@@ -2754,11 +2770,12 @@ function Lancer-Traitement([array]$cibles) {
         $cheminStlExistant = Join-Path $dossierSortie "$($grp.Nom).stl"
         $chemin3mfExistant = Join-Path $dossierSortie "$($grp.Nom).3mf"
         if ($aDesExclusions -and ((Test-Path $cheminStlExistant) -or (Test-Path $chemin3mfExistant))) {
+            $nomSuggere = Obtenir-ProchainNomLibre $grp.Nom $dossierSortie
             $reponse = [System.Windows.Forms.MessageBox]::Show(
-                "Un resultat '$($grp.Nom).stl' existe deja dans le dossier de sortie.`n`nSi c'est une AUTRE figurine du meme dossier source (plusieurs figurines/bases melangees dans un seul dossier, avec des pieces exclues differentes a chaque fois), renomme cette fusion maintenant pour ne pas ecraser le resultat precedent.`n`nRenommer avant de continuer ?`n(Non = cette figurine est ignoree pour ce lot)",
+                "Un resultat '$($grp.Nom).stl' existe deja dans le dossier de sortie.`n`nSi c'est une AUTRE figurine du meme dossier source (plusieurs figurines/bases melangees dans un seul dossier, avec des pieces exclues differentes a chaque fois), cette fusion-ci peut etre renommee automatiquement en '$nomSuggere' pour ne pas ecraser le resultat precedent (tu pourras changer ce nom propose si tu preferes autre chose).`n`nRenommer et continuer ?`n(Non = cette figurine est ignoree pour ce lot)",
                 "Fusion figurines - resultat deja existant", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($reponse -eq [System.Windows.Forms.DialogResult]::Yes) {
-                $nouveauNom = [Microsoft.VisualBasic.Interaction]::InputBox("Nouveau nom pour cette fusion (sans extension) :", "Renommer avant fusion", $grp.Nom)
+                $nouveauNom = [Microsoft.VisualBasic.Interaction]::InputBox("Nom propose automatiquement (modifie-le si tu veux autre chose) :", "Renommer avant fusion", $nomSuggere)
                 $nouveauNom = $nouveauNom.Trim()
                 if ($nouveauNom) {
                     $ancienNom = $grp.Nom
