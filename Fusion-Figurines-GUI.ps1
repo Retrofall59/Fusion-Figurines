@@ -2079,6 +2079,15 @@ $boutonScanner.Add_Click({
         # (voir Calculer-NombreTrianglesInclus) sans avoir a rouvrir les fichiers.
         $trianglesParPiece = @{}
         foreach ($p in $grp.Pieces) {
+            # 29/10/2026 : CAUSE TROUVEE du blocage signale par Tomyn - pas un bug, un fichier
+            # .obj de 51 millions de points (export ZBrush brut, "NOT_DECIMATION") qui a mis
+            # 113s a etre juste COMPTE, pendant lesquels rien ne s'affiche (voir plus bas, le
+            # chrono ne logue qu'APRES coup). Un .obj n'a pas d'en-tete a lire comme un .stl : sa
+            # taille sur disque EST deja l'info qu'on peut utiliser pour avertir AVANT de se
+            # lancer dans la lecture, au lieu de laisser Tomyn croire que tout est plante.
+            if ($p.Extension -eq '.obj' -and $p.Length -ge 80MB) {
+                Ajouter-Journal "[$($grp.Nom)] '$($p.Name)' fait $([Math]::Round($p.Length / 1MB)) Mo (.obj) - le comptage va prendre du temps (pas un blocage, verifie si c'est bien un fichier decime/utile a garder)."
+            }
             $chronoPiece = [System.Diagnostics.Stopwatch]::StartNew()
             $n = Compter-TrianglesPiece $p.FullName
             $chronoPiece.Stop()
