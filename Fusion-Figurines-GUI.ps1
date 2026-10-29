@@ -1594,6 +1594,19 @@ $listePieces.Add_ItemCheck({
         return
     }
     $grp.PiecesExclues = @($nouvellesExclues)
+    # 29/10/2026 : CORRECTIF signale par Tomyn - l'apercu de sortie (voir Rafraichir-ApercusPour)
+    # affiche le VRAI resultat des que $grp.CheminSortieStl pointe vers un fichier existant, sans
+    # jamais vérifier s'il correspond encore a la selection ACTUELLE de pieces. Dans un dossier
+    # avec plusieurs figurines (meme groupe reutilise avec des exclusions differentes a chaque
+    # fois, voir le renommage plus bas dans Lancer-Traitement), changer la selection apres un
+    # premier traitement gardait l'ancien resultat affiche au lieu de repasser sur l'estimation -
+    # Tomyn voyait la fusion precedente au lieu d'un apercu de celle qu'il est en train de
+    # preparer. On invalide donc ce resultat memorise des que la selection change : il ne
+    # redeviendra valide qu'apres un nouveau traitement reussi (voir $res.CheminSortieStl plus
+    # bas). Le statut repasse aussi a "En attente" pour la meme raison (plus de "OK" trompeur
+    # affiche pour une selection qui n'a pas encore ete traitee).
+    $grp.CheminSortieStl = $null
+    $grp.Statut = "En attente"
     if ($nouvellesExclues.Count -gt 0) {
         Ajouter-Journal "[$($grp.Nom)] $($nouvellesExclues.Count) piece(s) exclue(s) de la fusion : $($nouvellesExclues -join ', ')"
     } else {
@@ -1640,6 +1653,10 @@ $boutonToutInclure.Add_Click({
     }
     $grp = $liste.SelectedItems[0].Tag
     $grp.PiecesExclues = @()
+    # 29/10/2026 : voir le commentaire dans Add_ItemCheck plus haut - meme invalidation
+    # necessaire ici, ce bouton change aussi la selection de pieces.
+    $grp.CheminSortieStl = $null
+    $grp.Statut = "En attente"
     Ajouter-Journal "[$($grp.Nom)] Toutes les pieces sont incluses."
     Remplir-ListePieces $grp
     Mettre-A-Jour-LigneGroupe $grp
@@ -1659,6 +1676,10 @@ $boutonToutExclure.Add_Click({
     # Garde la DERNIERE piece incluse (voir commentaire a la creation du bouton) - toutes les
     # autres passent en exclues.
     $grp.PiecesExclues = @($grp.Pieces | Select-Object -First ($grp.Pieces.Count - 1) | ForEach-Object { $_.Name })
+    # 29/10/2026 : voir le commentaire dans Add_ItemCheck plus haut - meme invalidation
+    # necessaire ici, ce bouton change aussi la selection de pieces.
+    $grp.CheminSortieStl = $null
+    $grp.Statut = "En attente"
     Ajouter-Journal "[$($grp.Nom)] Toutes les pieces exclues sauf '$($grp.Pieces[-1].Name)' (clic sur 'Tout exclure')."
     Remplir-ListePieces $grp
     Mettre-A-Jour-LigneGroupe $grp
