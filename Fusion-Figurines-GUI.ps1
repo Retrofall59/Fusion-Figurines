@@ -2022,8 +2022,22 @@ $boutonScanner.Add_Click({
     # l'appli, pour que l'interface (et le reste du PC, qui n'a plus un thread UI monopolise a
     # 100% par une boucle PowerShell) reste utilisable meme sur un maillage enorme.
     if ($script:ApercuJobs.ContainsKey("scan")) {
-        [System.Windows.Forms.MessageBox]::Show("Un scan est deja en cours, attends qu'il se termine.", "Fusion figurines")
-        return
+        # 29/10/2026 : FILET DE SECURITE - Tomyn a eu ce message bloque indefiniment (des
+        # heures, plusieurs relances) a cause d'un bug de nettoyage (voir le correctif
+        # $apercuJobsPartage plus bas dans Demarrer-ScanTrianglesAsync). Ce bug precis est
+        # corrige, mais si un AUTRE probleme du meme genre devait se reproduire un jour, ce
+        # message ne doit plus jamais exiger un redemarrage complet de l'appli pour s'en sortir.
+        # Au-dela de 20 minutes (le pire cas mesure chez Tomyn, un .obj de 51 millions de
+        # points, a pris ~2 minutes - 20 min laisse une marge x10 largement confortable), on
+        # considere le job comme abandonne et on le debloque tout seul au lieu de bloquer a vie.
+        $ageJobScan = (Get-Date) - $script:ApercuJobs["scan"].Demarre
+        if ($ageJobScan.TotalMinutes -ge 20) {
+            Ajouter-Journal "ATTENTION : un ancien scan semblait toujours 'en cours' depuis plus de 20 minutes - debloque automatiquement (probablement un residu d'un plantage precedent)."
+            $script:ApercuJobs.Remove("scan")
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("Un scan est deja en cours, attends qu'il se termine.", "Fusion figurines")
+            return
+        }
     }
     $chronoScan = [System.Diagnostics.Stopwatch]::StartNew()
     $script:Groupes = @()
@@ -2231,6 +2245,17 @@ $resultats
     [void]$ps.AddScript($scriptTexte).AddArgument($groupesAEvaluer)
     $resultatAsync = $ps.BeginInvoke()
 
+    # 29/10/2026 : CORRECTIF - signale par Tomyn ("Un scan est deja en cours" qui reste bloque
+    # indefiniment, meme des heures et plusieurs scans/apercus reussis plus tard). Cause :
+    # $script:ApercuJobs.Remove("scan") etait appele DIRECTEMENT depuis l'interieur de cette
+    # closure .GetNewClosure() plus bas - exactement le piege deja documente et corrige le
+    # 27/10/2026 pour $script:EtatTraitement (voir Demarrer-ApercuAsync, qui utilise deja ce
+    # meme contournement) : une mutation/suppression faite via "$script:..." DEPUIS l'interieur
+    # d'une closure detachee ne se propage pas de maniere fiable vers la vraie variable de
+    # script - j'avais applique ce correctif partout ailleurs mais oublie ici en ecrivant ce
+    # nouveau code. Fix : capture LOCALE de la reference (avant GetNewClosure()), on mute CETTE
+    # copie locale dans la closure au lieu de "$script:ApercuJobs" directement.
+    $apercuJobsPartage = $script:ApercuJobs
     $dernierPalierJournal = 0
     $minuteur = New-Object System.Windows.Forms.Timer
     $minuteur.Interval = 300
@@ -2311,13 +2336,13 @@ $resultats
         } finally {
             try { $ps.Dispose() } catch {}
             $minuteur.Dispose()
-            $script:ApercuJobs.Remove("scan")
+            $apercuJobsPartage.Remove("scan")
             $boutonScanner.Enabled = $true
         }
     }.GetNewClosure()
     $minuteur.Add_Tick($gestionnaireTick)
 
-    $script:ApercuJobs["scan"] = [PSCustomObject]@{ Minuteur = $minuteur; PS = $ps }
+    $script:ApercuJobs["scan"] = [PSCustomObject]@{ Minuteur = $minuteur; PS = $ps; Demarre = Get-Date }
     $minuteur.Start()
 }
 
