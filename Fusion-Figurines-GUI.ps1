@@ -2241,6 +2241,10 @@ function Demarrer-ApercuAsync([string]$cle, [System.Windows.Forms.PictureBox]$pi
     # $THEME.FondChamp vaut $null et ca plante.
     $scriptTexte = 'param($CheminsFichiers, $BudgetParFichier, $THEME, $EcarterPieces, $Largeur, $Hauteur, $InclinaisonXDegres, $TailleBloc)' + "`r`n" +
         'function Lire-TrianglesSTLEchantillon {' + "`r`n" + $defLireSTL + "`r`n" + '}' + "`r`n" +
+        'function Compter-TrianglesOBJ {' + "`r`n" + $defCompterOBJ + "`r`n" + '}' + "`r`n" +
+        'function Lire-TrianglesOBJEchantillon {' + "`r`n" + $defLireOBJ + "`r`n" + '}' + "`r`n" +
+        'function Compter-TrianglesPiece {' + "`r`n" + $defCompterPiece + "`r`n" + '}' + "`r`n" +
+        'function Lire-TrianglesPieceEchantillon {' + "`r`n" + $defLirePiece + "`r`n" + '}' + "`r`n" +
         'function Rendre-ApercuIsometrique {' + "`r`n" + $defRendre + "`r`n" + '}' + "`r`n" +
         @'
 $tousTriangles = [System.Collections.Generic.List[object]]::new()
@@ -2268,7 +2272,7 @@ $cosRotX = [Math]::Cos($angleRotX); $sinRotX = [Math]::Sin($angleRotX)
 # recevoir les fichiers originaux, intacts).
 $decalageXSuivant = 0.0
 foreach ($chemin in $CheminsFichiers) {
-    $resultatLecture = Lire-TrianglesSTLEchantillon $chemin $BudgetParFichier
+    $resultatLecture = Lire-TrianglesPieceEchantillon $chemin $BudgetParFichier
     if ($angleRotX -ne 0) {
         foreach ($t in $resultatLecture.Triangles) {
             foreach ($pt in @($t.A, $t.B, $t.C)) {
@@ -2557,9 +2561,9 @@ function Traiter-UneFigurineCore([string]$nomFigurine, [string[]]$cheminsPieces,
     # le resultat dans Bambu Studio plusieurs minutes plus tard.
     $boitesParPiece = [System.Collections.Generic.List[object]]::new()
     foreach ($cheminPiece in $cheminsPieces) {
-        $nbTri = Compter-TrianglesSTL $cheminPiece
+        $nbTri = Compter-TrianglesPiece $cheminPiece
         if ($nbTri -le 0) { $nbTri = 1 }
-        $lu = Lire-TrianglesSTLEchantillon $cheminPiece ([Math]::Max($nbTri, 1))
+        $lu = Lire-TrianglesPieceEchantillon $cheminPiece ([Math]::Max($nbTri, 1))
         $minX = [double]::MaxValue; $maxX = [double]::MinValue
         $minY = [double]::MaxValue; $maxY = [double]::MinValue
         $minZ = [double]::MaxValue; $maxZ = [double]::MinValue
@@ -3138,6 +3142,14 @@ function Demarrer-ProchainTraitement([string]$dossierSortie, [string]$cheminBamb
     # Lire-TrianglesSTLEchantillon doivent donc aussi etre transmis au runspace.
     $defCompterTriangles = (Get-Item function:Compter-TrianglesSTL).Definition
     $defLireTrianglesEchantillon = (Get-Item function:Lire-TrianglesSTLEchantillon).Definition
+    # 29/10/2026 : support .obj (voir Compter-TrianglesPiece/Lire-TrianglesPieceEchantillon) -
+    # Traiter-UneFigurineCore appelle maintenant ces deux-la au lieu des fonctions STL directes
+    # (voir plus bas, boucle de lecture des pieces pour la fusion locale), donc elles doivent
+    # etre transmises a CE runspace aussi, meme principe que les deux lignes au-dessus.
+    $defCompterOBJ = (Get-Item function:Compter-TrianglesOBJ).Definition
+    $defLireOBJ = (Get-Item function:Lire-TrianglesOBJEchantillon).Definition
+    $defCompterPiece = (Get-Item function:Compter-TrianglesPiece).Definition
+    $defLirePiece = (Get-Item function:Lire-TrianglesPieceEchantillon).Definition
     # 27/10/2026 : CORRECTIF CRASH - Test-PiecesEnContact (detection "pieces proches mais pas
     # vraiment en contact") etait appelee par Traiter-UneFigurineCore mais jamais transmise a
     # CE runspace (session isolee, voir le commentaire juste au-dessus) : "Test-PiecesEnContact
@@ -3153,6 +3165,10 @@ function Demarrer-ProchainTraitement([string]$dossierSortie, [string]$cheminBamb
         'function Ecrire-STLBinaire {' + "`r`n" + $defEcrireStl + "`r`n" + '}' + "`r`n" +
         'function Compter-TrianglesSTL {' + "`r`n" + $defCompterTriangles + "`r`n" + '}' + "`r`n" +
         'function Lire-TrianglesSTLEchantillon {' + "`r`n" + $defLireTrianglesEchantillon + "`r`n" + '}' + "`r`n" +
+        'function Compter-TrianglesOBJ {' + "`r`n" + $defCompterOBJ + "`r`n" + '}' + "`r`n" +
+        'function Lire-TrianglesOBJEchantillon {' + "`r`n" + $defLireOBJ + "`r`n" + '}' + "`r`n" +
+        'function Compter-TrianglesPiece {' + "`r`n" + $defCompterPiece + "`r`n" + '}' + "`r`n" +
+        'function Lire-TrianglesPieceEchantillon {' + "`r`n" + $defLirePiece + "`r`n" + '}' + "`r`n" +
         'function Test-PiecesEnContact {' + "`r`n" + $defTestPiecesEnContact + "`r`n" + '}' + "`r`n" +
         'function Traiter-UneFigurineCore {' + "`r`n" + $defCore + "`r`n" + '}' + "`r`n" +
         'Traiter-UneFigurineCore $NomFigurine $CheminsPieces $DossierSortie $CheminBambuExe $OrientationAuto $EtatAnnulation $HeureEnvoi $SeuilContactMm'
