@@ -2009,13 +2009,22 @@ $boutonScanner.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Dossier racine invalide.", "Fusion figurines")
         return
     }
-    # 29/10/2026 : demande de Tomyn - un scan avec des .obj a mis pres de 10 minutes alors que
-    # le comptage de triangles seul (mesure isolee) prend moins d'1s meme sur un .obj de
-    # plusieurs Mo : la lenteur ne vient donc PAS forcement du parsing lui-meme, mais le journal
-    # ne donnait jusqu'ici aucune info pendant le scan (silence total entre le clic et "Scan
-    # termine"). On chronometre maintenant le scan en entier ET chaque piece individuellement,
-    # pour que le PROCHAIN blocage pointe directement le fichier/l'etape responsable au lieu de
-    # deviner a l'aveugle.
+    # 29/10/2026 : CORRECTIF DE FOND - Tomyn a eu le PC ENTIER bloque (pas juste la fenetre)
+    # plusieurs minutes a cause d'un .obj de 51 millions de points : son comptage tournait EN
+    # BOUCLE SYNCHRONE SUR LE THREAD DE L'INTERFACE (aucun Application.DoEvents, aucune pompe
+    # de messages traitee pendant tout ce temps), exactement le meme type de probleme que celui
+    # deja corrige pour l'apercu (voir Demarrer-ApercuAsync) et le traitement (voir
+    # Demarrer-ProchainTraitement) le 26-27/10. Un .stl n'etait jamais touche par ca (en-tete de
+    # 84 octets, quasi instantane), donc ce defaut dormait depuis le debut et n'a ete revele que
+    # par l'arrivee du .obj. Le chronometrage ajoute plus tot aujourd'hui etait un correctif de
+    # DIAGNOSTIC (voir la fonction Demarrer-ScanTrianglesAsync plus bas) ; celui-ci est le vrai
+    # correctif : le comptage part maintenant dans un Runspace separe, comme le reste de
+    # l'appli, pour que l'interface (et le reste du PC, qui n'a plus un thread UI monopolise a
+    # 100% par une boucle PowerShell) reste utilisable meme sur un maillage enorme.
+    if ($script:ApercuJobs.ContainsKey("scan")) {
+        [System.Windows.Forms.MessageBox]::Show("Un scan est deja en cours, attends qu'il se termine.", "Fusion figurines")
+        return
+    }
     $chronoScan = [System.Diagnostics.Stopwatch]::StartNew()
     $script:Groupes = @()
 
@@ -2053,79 +2062,20 @@ $boutonScanner.Add_Click({
         }
     }
 
-    # 26/10/2026 : comptage rapide des triangles par figurine (juste les en-tetes STL,
-    # instantane) pour avertir sur les gros maillages AVANT de lancer un traitement avec
-    # orientation auto qui serait tres long.
-    $figurinesVolumineuses = [System.Collections.Generic.List[string]]::new()
-    # 27/10/2026 : "Poseidons Brutes - Swords" a deja casse la ligne de commande a cause d'un
-    # " - " dans le nom de dossier (voir plus bas Traiter-UneFigurineCore, correctif des
-    # guillemets). Les guillemets sont desormais poses nous-memes, mais un GUILLEMET DROIT
-    # DANS le nom lui-meme casserait a nouveau le guillemetage - et quelques autres caracteres
-    # speciaux a Windows (< > | ^ %) peuvent aussi poser probleme selon le contexte. On
-    # avertit au scan plutot que de laisser decouvrir ca a l'echec du traitement.
-    $caracteresProblematiques = '["<>|\^%]'
+    # 29/10/2026 : passage synchrone -> UNIQUEMENT pour verifier la taille sur disque de
+    # chaque .obj (quasi instantane, simple metadonnee de fichier, pas de lecture de
+    # contenu) et avertir tout de suite sur un fichier anormalement gros - voir le gros
+    # commentaire plus haut sur pourquoi le COMPTAGE reel (lui, couteux) part en
+    # arriere-plan via Demarrer-ScanTrianglesAsync juste en dessous.
     foreach ($grp in $script:Groupes) {
-        $total = 0
-        # 27/10/2026 : avant, un .stl vide/corrompu ne se decouvrait qu'au moment de son
-        # traitement reel - potentiellement apres une longue attente dans la file. On le
-        # signale maintenant des le scan : -1 = format non reconnu (STL ASCII, fichier trop
-        # petit, erreur de lecture), 0 = STL binaire valide mais sans triangle - dans les deux
-        # cas la piece ne contribuera rien a la fusion.
-        $piecesSuspectes = [System.Collections.Generic.List[string]]::new()
-        # 27/10/2026 : demande de Tomyn - le nombre de triangles affiche dans le tableau doit
-        # refleter ce qui sera REELLEMENT fusionne (pieces incluses seulement), pas le total de
-        # toutes les pieces qu'on exclue ou pas. On garde donc le compte PAR PIECE (deja lu ici,
-        # quasi gratuit) pour pouvoir recalculer instantanement a chaque case cochee/decochee
-        # (voir Calculer-NombreTrianglesInclus) sans avoir a rouvrir les fichiers.
-        $trianglesParPiece = @{}
         foreach ($p in $grp.Pieces) {
-            # 29/10/2026 : CAUSE TROUVEE du blocage signale par Tomyn - pas un bug, un fichier
-            # .obj de 51 millions de points (export ZBrush brut, "NOT_DECIMATION") qui a mis
-            # 113s a etre juste COMPTE, pendant lesquels rien ne s'affiche (voir plus bas, le
-            # chrono ne logue qu'APRES coup). Un .obj n'a pas d'en-tete a lire comme un .stl : sa
-            # taille sur disque EST deja l'info qu'on peut utiliser pour avertir AVANT de se
-            # lancer dans la lecture, au lieu de laisser Tomyn croire que tout est plante.
             if ($p.Extension -eq '.obj' -and $p.Length -ge 80MB) {
-                Ajouter-Journal "[$($grp.Nom)] '$($p.Name)' fait $([Math]::Round($p.Length / 1MB)) Mo (.obj) - le comptage va prendre du temps (pas un blocage, verifie si c'est bien un fichier decime/utile a garder)."
+                Ajouter-Journal "[$($grp.Nom)] '$($p.Name)' fait $([Math]::Round($p.Length / 1MB)) Mo (.obj) - le comptage va prendre du temps en arriere-plan (verifie si c'est bien un fichier decime/utile a garder)."
             }
-            $chronoPiece = [System.Diagnostics.Stopwatch]::StartNew()
-            $n = Compter-TrianglesPiece $p.FullName
-            $chronoPiece.Stop()
-            # 29/10/2026 : seuil de 1s - voir commentaire sur $chronoScan plus haut. On ne logue
-            # QUE les pieces anormalement lentes (pas chacune) pour ne pas noyer le journal sur
-            # un gros lot ou tout va bien.
-            if ($chronoPiece.Elapsed.TotalSeconds -ge 1) {
-                Ajouter-Journal "[$($grp.Nom)] Comptage de '$($p.Name)' anormalement lent : $([Math]::Round($chronoPiece.Elapsed.TotalSeconds, 1))s."
-            }
-            if ($n -ge 0) { $total += $n }
-            if ($n -le 0) { $piecesSuspectes.Add($p.Name) }
-            $trianglesParPiece[$p.Name] = [Math]::Max(0, $n)
-        }
-        if ($piecesSuspectes.Count -gt 0) {
-            Ajouter-Journal "[$($grp.Nom)] ATTENTION : piece(s) vide(s) ou illisible(s) - $($piecesSuspectes -join ', ') - verifie le(s) fichier(s) ou exclus-le(s) via clic droit > 'Choisir les pieces a inclure' avant de lancer."
-        }
-        $grp | Add-Member -NotePropertyName TrianglesParPiece -NotePropertyValue $trianglesParPiece -Force
-        $grp | Add-Member -NotePropertyName NombreTriangles -NotePropertyValue $total -Force
-        if ($total -ge $script:SeuilGrosMaillage) {
-            $figurinesVolumineuses.Add("$($grp.Nom) ($([int]($total/1000))k triangles)")
-            Ajouter-Journal "[$($grp.Nom)] ATTENTION gros maillage : $total triangles - laisser 'Orientation auto' decochee, sinon ca peut prendre 10-25+ minutes."
-        }
-        if ($grp.Dossier -match $caracteresProblematiques) {
-            Ajouter-Journal "[$($grp.Nom)] ATTENTION : le chemin du dossier contient un caractere qui peut casser la ligne de commande Bambu Studio ($($grp.Dossier)) - si le traitement echoue bizarrement, essaie de renommer le dossier sans guillemets/chevrons/barres."
         }
     }
 
-    Rafraichir-ListeGroupes
-    Remplir-ListePieces $null
-    $chronoScan.Stop()
-    Ajouter-Journal "Scan termine en $([Math]::Round($chronoScan.Elapsed.TotalSeconds, 1))s : $($script:Groupes.Count) figurine(s) multi-pieces detectee(s) (sous-dossiers avec 2 .stl ou plus)."
-    if ($sousDossiersIgnores.Count -gt 0) {
-        Ajouter-Journal "$($sousDossiersIgnores.Count) sous-dossier(s) ignore(s) (0 ou 1 .stl, rien a fusionner) : $($sousDossiersIgnores -join ', ')"
-    }
-
-    if ($figurinesVolumineuses.Count -gt 0) {
-        Afficher-Toast "Maillage volumineux detecte :`r`n$($figurinesVolumineuses -join "`r`n")`r`n`r`nLaisse 'Orientation auto' decochee pour ces figurines (sinon ca peut prendre 10-25+ minutes chacune)."
-    }
+    Demarrer-ScanTrianglesAsync $chronoScan $sousDossiersIgnores
 })
 
 # ============================================================================
@@ -2211,6 +2161,164 @@ function Arreter-ApercuJob([string]$cle) {
     # recupere par le garbage collector, sans jamais etre reutilise en parallele d'un autre.
     $script:ApercuRunspacesPartagees.Remove($cle)
     $script:ApercuJobs.Remove($cle)
+}
+
+# 29/10/2026 : CORRECTIF DE FOND - voir le gros commentaire dans $boutonScanner.Add_Click.
+# Le comptage des triangles (la partie couteuse du scan, potentiellement tres longue sur un
+# .obj volumineux - voir Compter-TrianglesOBJ, pas de raccourci possible en texte contrairement
+# a l'en-tete .stl) tournait jusqu'ici EN BOUCLE SUR LE THREAD DE L'INTERFACE : meme principe de
+# probleme (et meme solution) que Demarrer-ApercuAsync/Demarrer-ProchainTraitement un peu plus
+# haut dans le fichier - Runspace partage (cle "scan", reutilise la meme infra
+# Obtenir-RunspacePartagee/Arreter-ApercuJob/$script:ApercuJobs que l'apercu) + Timer WinForms
+# qui sonde la fin du calcul sans bloquer la pompe de messages.
+# NE FAIT QUE le comptage par piece : la decouverte des dossiers (Get-ChildItem) reste sur le
+# thread UI (rapide, juste des metadonnees de fichiers) et les verifications "gros maillage"/
+# "caractere problematique dans le chemin" repassent par le thread UI UNE FOIS les totaux
+# revenus (pas besoin d'etre dans le Runspace, ce sont de simples comparaisons sur des nombres
+#/chaines deja connus).
+function Demarrer-ScanTrianglesAsync([System.Diagnostics.Stopwatch]$chronoScan, [System.Collections.Generic.List[string]]$sousDossiersIgnores) {
+    $groupesAEvaluer = $script:Groupes
+    if ($groupesAEvaluer.Count -eq 0) {
+        Rafraichir-ListeGroupes
+        Remplir-ListePieces $null
+        $chronoScan.Stop()
+        Ajouter-Journal "Scan termine en $([Math]::Round($chronoScan.Elapsed.TotalSeconds, 1))s : 0 figurine(s) multi-pieces detectee(s) (sous-dossiers avec 2 .stl ou plus)."
+        if ($sousDossiersIgnores.Count -gt 0) {
+            Ajouter-Journal "$($sousDossiersIgnores.Count) sous-dossier(s) ignore(s) (0 ou 1 .stl, rien a fusionner) : $($sousDossiersIgnores -join ', ')"
+        }
+        return
+    }
+
+    $boutonScanner.Enabled = $false
+    Ajouter-Journal "Comptage des triangles de $($groupesAEvaluer.Count) figurine(s) en arriere-plan (l'interface reste utilisable)..."
+
+    $defCompterSTL = (Get-Item function:Compter-TrianglesSTL).Definition
+    $defCompterOBJ = (Get-Item function:Compter-TrianglesOBJ).Definition
+    $defCompterPiece = (Get-Item function:Compter-TrianglesPiece).Definition
+    $scriptTexte = 'param($Groupes)' + "`r`n" +
+        'function Compter-TrianglesSTL {' + "`r`n" + $defCompterSTL + "`r`n" + '}' + "`r`n" +
+        'function Compter-TrianglesOBJ {' + "`r`n" + $defCompterOBJ + "`r`n" + '}' + "`r`n" +
+        'function Compter-TrianglesPiece {' + "`r`n" + $defCompterPiece + "`r`n" + '}' + "`r`n" +
+        @'
+$resultats = [System.Collections.Generic.List[object]]::new()
+foreach ($grp in $Groupes) {
+    $total = 0
+    $piecesSuspectes = [System.Collections.Generic.List[string]]::new()
+    $piecesLentes = [System.Collections.Generic.List[object]]::new()
+    $trianglesParPiece = @{}
+    foreach ($p in $grp.Pieces) {
+        $chronoPiece = [System.Diagnostics.Stopwatch]::StartNew()
+        $n = Compter-TrianglesPiece $p.FullName
+        $chronoPiece.Stop()
+        if ($chronoPiece.Elapsed.TotalSeconds -ge 1) {
+            $piecesLentes.Add([PSCustomObject]@{ Nom = $p.Name; Secondes = $chronoPiece.Elapsed.TotalSeconds })
+        }
+        if ($n -ge 0) { $total += $n }
+        if ($n -le 0) { $piecesSuspectes.Add($p.Name) }
+        $trianglesParPiece[$p.Name] = [Math]::Max(0, $n)
+    }
+    $resultats.Add([PSCustomObject]@{
+        Nom = $grp.Nom; Total = $total; TrianglesParPiece = $trianglesParPiece
+        PiecesSuspectes = @($piecesSuspectes); PiecesLentes = @($piecesLentes)
+    })
+}
+$resultats
+'@
+
+    $rs = Obtenir-RunspacePartagee "scan"
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript($scriptTexte).AddArgument($groupesAEvaluer)
+    $resultatAsync = $ps.BeginInvoke()
+
+    $dernierPalierJournal = 0
+    $minuteur = New-Object System.Windows.Forms.Timer
+    $minuteur.Interval = 300
+    $gestionnaireTick = {
+        if (-not $resultatAsync.IsCompleted) {
+            # 29/10/2026 : meme principe que Demarrer-ProchainTraitement - signe de vie
+            # periodique dans le journal (pas de progression exacte possible depuis ici, le
+            # Runspace ne rapporte qu'a la toute fin), pour que "ca a l'air plante" ne soit
+            # jamais l'impression donnee pendant un gros maillage.
+            $secondesEcoulees = [int]$chronoScan.Elapsed.TotalSeconds
+            $palier5s = [Math]::Floor($secondesEcoulees / 5)
+            if ($palier5s -gt $dernierPalierJournal) {
+                $dernierPalierJournal = $palier5s
+                Ajouter-Journal "Scan... toujours en cours ($($secondesEcoulees)s ecoulees)"
+            }
+            return
+        }
+        $minuteur.Stop()
+        try {
+            $sortie = $ps.EndInvoke($resultatAsync)
+            if ($ps.HadErrors) {
+                $msgs = $ps.Streams.Error | ForEach-Object {
+                    $texte = $_.ToString()
+                    if ($_.Exception -and $_.Exception.Message) { $texte = "$texte [$($_.Exception.GetType().FullName)] $($_.Exception.Message)" }
+                    if ($_.ScriptStackTrace) { $texte = "$texte -- $($_.ScriptStackTrace -replace '[\r\n]+', ' > ')" }
+                    $texte
+                }
+                if (-not $msgs -or $msgs.Count -eq 0) { $msgs = @("(HadErrors=true mais Streams.Error vide - cause inconnue)") }
+                Ajouter-Journal "Erreur pendant le comptage des triangles : $($msgs -join ' | ')"
+            } else {
+                $caracteresProblematiques = '["<>|\^%]'
+                $figurinesVolumineuses = [System.Collections.Generic.List[string]]::new()
+                # 29/10/2026 : @() force un tableau meme si le Runspace n'a renvoye qu'UN SEUL
+                # resultat (cas d'un dossier avec une seule figurine detectee) - sans ca,
+                # PowerShell "deballe" une collection a un seul element en objet nu, et
+                # $sortie[$i] plus bas planterait avec plus d'1 groupe attendu.
+                $sortie = @($sortie)
+                for ($i = 0; $i -lt $groupesAEvaluer.Count; $i++) {
+                    $grp = $groupesAEvaluer[$i]
+                    # Appariement par INDEX (pas par Nom) : l'ordre de sortie suit toujours
+                    # l'ordre d'entree (simple .Add() sequentiel dans la boucle du Runspace,
+                    # jamais trie/regroupe), et ca evite tout risque de collision si deux
+                    # dossiers differents partageaient le meme nom de figurine.
+                    $res = if ($i -lt $sortie.Count) { $sortie[$i] } else { $null }
+                    if (-not $res) { continue }
+                    foreach ($pl in $res.PiecesLentes) {
+                        Ajouter-Journal "[$($grp.Nom)] Comptage de '$($pl.Nom)' anormalement lent : $([Math]::Round($pl.Secondes, 1))s."
+                    }
+                    if ($res.PiecesSuspectes.Count -gt 0) {
+                        Ajouter-Journal "[$($grp.Nom)] ATTENTION : piece(s) vide(s) ou illisible(s) - $($res.PiecesSuspectes -join ', ') - verifie le(s) fichier(s) ou exclus-le(s) via clic droit > 'Choisir les pieces a inclure' avant de lancer."
+                    }
+                    $grp | Add-Member -NotePropertyName TrianglesParPiece -NotePropertyValue $res.TrianglesParPiece -Force
+                    $grp | Add-Member -NotePropertyName NombreTriangles -NotePropertyValue $res.Total -Force
+                    if ($res.Total -ge $script:SeuilGrosMaillage) {
+                        $figurinesVolumineuses.Add("$($grp.Nom) ($([int]($res.Total/1000))k triangles)")
+                        Ajouter-Journal "[$($grp.Nom)] ATTENTION gros maillage : $($res.Total) triangles - laisser 'Orientation auto' decochee, sinon ca peut prendre 10-25+ minutes."
+                    }
+                    if ($grp.Dossier -match $caracteresProblematiques) {
+                        Ajouter-Journal "[$($grp.Nom)] ATTENTION : le chemin du dossier contient un caractere qui peut casser la ligne de commande Bambu Studio ($($grp.Dossier)) - si le traitement echoue bizarrement, essaie de renommer le dossier sans guillemets/chevrons/barres."
+                    }
+                }
+                Rafraichir-ListeGroupes
+                Remplir-ListePieces $null
+                $chronoScan.Stop()
+                Ajouter-Journal "Scan termine en $([Math]::Round($chronoScan.Elapsed.TotalSeconds, 1))s : $($groupesAEvaluer.Count) figurine(s) multi-pieces detectee(s) (sous-dossiers avec 2 .stl ou plus)."
+                if ($sousDossiersIgnores.Count -gt 0) {
+                    Ajouter-Journal "$($sousDossiersIgnores.Count) sous-dossier(s) ignore(s) (0 ou 1 .stl, rien a fusionner) : $($sousDossiersIgnores -join ', ')"
+                }
+                if ($figurinesVolumineuses.Count -gt 0) {
+                    Afficher-Toast "Maillage volumineux detecte :`r`n$($figurinesVolumineuses -join "`r`n")`r`n`r`nLaisse 'Orientation auto' decochee pour ces figurines (sinon ca peut prendre 10-25+ minutes chacune)."
+                }
+            }
+        } catch {
+            $detailFlux = ($ps.Streams.Error | ForEach-Object { $_.ToString() }) -join ' | '
+            $texteErreur = "[$($_.Exception.GetType().FullName)] $($_.Exception.Message)"
+            if ($detailFlux) { $texteErreur = "$texteErreur -- flux erreurs : $detailFlux" }
+            Ajouter-Journal "Erreur pendant le comptage des triangles : $texteErreur"
+        } finally {
+            try { $ps.Dispose() } catch {}
+            $minuteur.Dispose()
+            $script:ApercuJobs.Remove("scan")
+            $boutonScanner.Enabled = $true
+        }
+    }.GetNewClosure()
+    $minuteur.Add_Tick($gestionnaireTick)
+
+    $script:ApercuJobs["scan"] = [PSCustomObject]@{ Minuteur = $minuteur; PS = $ps }
+    $minuteur.Start()
 }
 
 function Demarrer-ApercuAsync([string]$cle, [System.Windows.Forms.PictureBox]$picturebox, [string[]]$cheminsFichiers, [bool]$EcarterPieces = $false, [int]$BudgetTotal = 80000, [int]$Largeur = 320, [int]$Hauteur = 240, [double]$InclinaisonXDegres = 0, [int]$TailleBloc = 2) {
