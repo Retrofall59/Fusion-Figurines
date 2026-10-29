@@ -2009,6 +2009,14 @@ $boutonScanner.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Dossier racine invalide.", "Fusion figurines")
         return
     }
+    # 29/10/2026 : demande de Tomyn - un scan avec des .obj a mis pres de 10 minutes alors que
+    # le comptage de triangles seul (mesure isolee) prend moins d'1s meme sur un .obj de
+    # plusieurs Mo : la lenteur ne vient donc PAS forcement du parsing lui-meme, mais le journal
+    # ne donnait jusqu'ici aucune info pendant le scan (silence total entre le clic et "Scan
+    # termine"). On chronometre maintenant le scan en entier ET chaque piece individuellement,
+    # pour que le PROCHAIN blocage pointe directement le fichier/l'etape responsable au lieu de
+    # deviner a l'aveugle.
+    $chronoScan = [System.Diagnostics.Stopwatch]::StartNew()
     $script:Groupes = @()
 
     # 26/10/2026 : CAS 1 - le dossier racine CONTIENT LUI-MEME directement les pieces (ex:
@@ -2071,7 +2079,15 @@ $boutonScanner.Add_Click({
         # (voir Calculer-NombreTrianglesInclus) sans avoir a rouvrir les fichiers.
         $trianglesParPiece = @{}
         foreach ($p in $grp.Pieces) {
+            $chronoPiece = [System.Diagnostics.Stopwatch]::StartNew()
             $n = Compter-TrianglesPiece $p.FullName
+            $chronoPiece.Stop()
+            # 29/10/2026 : seuil de 1s - voir commentaire sur $chronoScan plus haut. On ne logue
+            # QUE les pieces anormalement lentes (pas chacune) pour ne pas noyer le journal sur
+            # un gros lot ou tout va bien.
+            if ($chronoPiece.Elapsed.TotalSeconds -ge 1) {
+                Ajouter-Journal "[$($grp.Nom)] Comptage de '$($p.Name)' anormalement lent : $([Math]::Round($chronoPiece.Elapsed.TotalSeconds, 1))s."
+            }
             if ($n -ge 0) { $total += $n }
             if ($n -le 0) { $piecesSuspectes.Add($p.Name) }
             $trianglesParPiece[$p.Name] = [Math]::Max(0, $n)
@@ -2092,7 +2108,8 @@ $boutonScanner.Add_Click({
 
     Rafraichir-ListeGroupes
     Remplir-ListePieces $null
-    Ajouter-Journal "Scan termine : $($script:Groupes.Count) figurine(s) multi-pieces detectee(s) (sous-dossiers avec 2 .stl ou plus)."
+    $chronoScan.Stop()
+    Ajouter-Journal "Scan termine en $([Math]::Round($chronoScan.Elapsed.TotalSeconds, 1))s : $($script:Groupes.Count) figurine(s) multi-pieces detectee(s) (sous-dossiers avec 2 .stl ou plus)."
     if ($sousDossiersIgnores.Count -gt 0) {
         Ajouter-Journal "$($sousDossiersIgnores.Count) sous-dossier(s) ignore(s) (0 ou 1 .stl, rien a fusionner) : $($sousDossiersIgnores -join ', ')"
     }
