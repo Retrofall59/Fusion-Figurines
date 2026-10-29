@@ -2048,9 +2048,22 @@ function Arreter-ApercuJob([string]$cle) {
     try { $job.Minuteur.Dispose() } catch {}
     try { $job.PS.Stop() } catch {}
     try { $job.PS.Dispose() } catch {}
-    # Le Runspace N'EST PAS ferme ici : il est partage/reutilise d'un apercu a l'autre
-    # (voir Obtenir-RunspacePartagee) pour eviter de repayer son cout de demarrage a
-    # chaque clic.
+    # 29/10/2026 : CORRECTIF - signale par Tomyn (cascade d'erreurs "fichier introuvable" puis
+    # "expression Null" puis "depassement de capacite", a des lignes DIFFERENTES de la MEME
+    # fonction, pour UN SEUL fichier qui existait pourtant bel et bien, juste apres avoir coche/
+    # decoche plusieurs cases d'exclusion rapidement). Cause : $job.PS.Stop() ci-dessus NE
+    # GARANTIT PAS que le script encore en cours s'arrete reellement avant de rendre la main -
+    # une E/S bloquante (OpenRead) n'est pas interrompue par Stop(). Avant ce correctif, le
+    # Runspace PARTAGE etait reutilise IMMEDIATEMENT pour le PROCHAIN apercu (commentaire
+    # original : "pour eviter de repayer son cout de demarrage") alors que l'ancien script
+    # pouvait encore tourner dessus en arriere-plan - deux scripts executes EN MEME TEMPS sur
+    # le MEME Runspace corrompent son etat interne, ce qui correspond exactement aux erreurs en
+    # cascade observees. On abandonne desormais ce Runspace (sans le FERMER de force - Close()
+    # sur un Runspace occupe par une E/S bloquante risquerait a son tour de geler l'interface,
+    # meme probleme que Stop() plus haut) : le prochain apercu via Obtenir-RunspacePartagee en
+    # recreera un NOUVEAU et PROPRE. L'ancien finira (ou se fera tuer) de son cote et sera
+    # recupere par le garbage collector, sans jamais etre reutilise en parallele d'un autre.
+    $script:ApercuRunspacesPartagees.Remove($cle)
     $script:ApercuJobs.Remove($cle)
 }
 
