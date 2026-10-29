@@ -1438,7 +1438,7 @@ Arrondir-Bouton $apercuPiece 8
 $boutonToutInclure = New-Object System.Windows.Forms.Button
 $boutonToutInclure.Text = "Tout reinclure"
 $boutonToutInclure.Location = New-Object System.Drawing.Point(472, 650)
-$boutonToutInclure.Size = New-Object System.Drawing.Size(100, 160)
+$boutonToutInclure.Size = New-Object System.Drawing.Size(100, 76)
 $boutonToutInclure.BackColor = $THEME.FondPanneau
 $boutonToutInclure.ForeColor = $THEME.Texte
 $boutonToutInclure.FlatStyle = "Flat"
@@ -1450,10 +1450,14 @@ Arrondir-Bouton $boutonToutInclure
 # 1-2 bonnes que de decocher une a une toutes les mauvaises). Garde toujours la DERNIERE piece
 # incluse (meme regle que le garde-fou de $listePieces.Add_ItemCheck plus bas : "il faut garder
 # au moins une piece incluse") plutot que de se retrouver avec zero piece a fusionner.
+# 29/10/2026 : CORRECTIF - place a cote de "Tout reinclure" (x=578), ca mordait sur l'apercu de
+# sortie qui commence juste apres a x=584 (vu par Tomyn sur une photo de son ecran : le bouton
+# recouvrait carrement la case "Apercu sortie"). Empile desormais SOUS "Tout reinclure" dans la
+# meme colonne (x=472) au lieu de cote, pas de risque de deborder sur l'apercu.
 $boutonToutExclure = New-Object System.Windows.Forms.Button
 $boutonToutExclure.Text = "Tout exclure"
-$boutonToutExclure.Location = New-Object System.Drawing.Point(578, 650)
-$boutonToutExclure.Size = New-Object System.Drawing.Size(100, 160)
+$boutonToutExclure.Location = New-Object System.Drawing.Point(472, 734)
+$boutonToutExclure.Size = New-Object System.Drawing.Size(100, 76)
 $boutonToutExclure.BackColor = $THEME.FondPanneau
 $boutonToutExclure.ForeColor = $THEME.Texte
 $boutonToutExclure.FlatStyle = "Flat"
