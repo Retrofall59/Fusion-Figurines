@@ -1441,6 +1441,21 @@ $boutonToutInclure.FlatStyle = "Flat"
 $form.Controls.Add($boutonToutInclure)
 Arrondir-Bouton $boutonToutInclure
 
+# 29/10/2026 : demande de Tomyn - symetrique de "Tout reinclure" : utile quand il ne veut
+# garder qu'une ou deux pieces sur un gros lot (plus rapide de tout exclure puis recocher les
+# 1-2 bonnes que de decocher une a une toutes les mauvaises). Garde toujours la DERNIERE piece
+# incluse (meme regle que le garde-fou de $listePieces.Add_ItemCheck plus bas : "il faut garder
+# au moins une piece incluse") plutot que de se retrouver avec zero piece a fusionner.
+$boutonToutExclure = New-Object System.Windows.Forms.Button
+$boutonToutExclure.Text = "Tout exclure"
+$boutonToutExclure.Location = New-Object System.Drawing.Point(578, 650)
+$boutonToutExclure.Size = New-Object System.Drawing.Size(100, 160)
+$boutonToutExclure.BackColor = $THEME.FondPanneau
+$boutonToutExclure.ForeColor = $THEME.Texte
+$boutonToutExclure.FlatStyle = "Flat"
+$form.Controls.Add($boutonToutExclure)
+Arrondir-Bouton $boutonToutExclure
+
 # 27/10/2026 : demande de Tomyn - ouvrir directement le resultat (.3mf) d'une figurine deja
 # traitee pour verifier l'assemblage dans Bambu Studio, sans fouiller dans l'explorateur.
 # Double-clic sur la ligne OU clic droit -> "Ouvrir le resultat".
@@ -1613,6 +1628,25 @@ $boutonToutInclure.Add_Click({
     $grp = $liste.SelectedItems[0].Tag
     $grp.PiecesExclues = @()
     Ajouter-Journal "[$($grp.Nom)] Toutes les pieces sont incluses."
+    Remplir-ListePieces $grp
+    Mettre-A-Jour-LigneGroupe $grp
+    Rafraichir-ApercusPour $grp
+})
+
+$boutonToutExclure.Add_Click({
+    if ($liste.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Selectionne d'abord une figurine dans la liste.", "Fusion figurines")
+        return
+    }
+    $grp = $liste.SelectedItems[0].Tag
+    if ($grp.Pieces.Count -le 1) {
+        [System.Windows.Forms.MessageBox]::Show("Il faut garder au moins une piece incluse.", "Fusion figurines")
+        return
+    }
+    # Garde la DERNIERE piece incluse (voir commentaire a la creation du bouton) - toutes les
+    # autres passent en exclues.
+    $grp.PiecesExclues = @($grp.Pieces | Select-Object -First ($grp.Pieces.Count - 1) | ForEach-Object { $_.Name })
+    Ajouter-Journal "[$($grp.Nom)] Toutes les pieces exclues sauf '$($grp.Pieces[-1].Name)' (clic sur 'Tout exclure')."
     Remplir-ListePieces $grp
     Mettre-A-Jour-LigneGroupe $grp
     Rafraichir-ApercusPour $grp
