@@ -1766,6 +1766,16 @@ function Ajouter-Journal([string]$texte) {
 $script:Groupes = @()
 
 function Rafraichir-ListeGroupes {
+    # 29/10/2026 : CORRECTIF signale par Tomyn - $liste.Items.Clear() ci-dessous vide aussi la
+    # SELECTION, ce qui cassait silencieusement le rafraichissement automatique de l'apercu
+    # apres un traitement : le "finally" du minuteur de traitement appelle CETTE fonction, PUIS
+    # verifie "$liste.SelectedItems[0].Tag -eq $grp" pour savoir s'il doit rebasculer l'apercu
+    # sur le vrai resultat - sauf que plus rien n'est selectionne a ce moment-la (vide par la
+    # ligne juste en dessous), donc cette condition etait TOUJOURS fausse et l'apercu restait
+    # bloque sur l'ancien contenu ("estimation") meme apres un traitement reussi. On memorise
+    # les groupes selectionnes avant de vider la liste, et on les re-selectionne une fois
+    # repeuplee.
+    $groupesSelectionnes = @($liste.SelectedItems | ForEach-Object { $_.Tag })
     $liste.Items.Clear()
     foreach ($grp in $script:Groupes) {
         $ligne = New-Object System.Windows.Forms.ListViewItem($grp.Nom)
@@ -1778,6 +1788,7 @@ function Rafraichir-ListeGroupes {
         [void]$ligne.SubItems.Add($grp.Statut)
         $ligne.Tag = $grp
         $liste.Items.Add($ligne) | Out-Null
+        if ($groupesSelectionnes -contains $grp) { $ligne.Selected = $true }
     }
 }
 
