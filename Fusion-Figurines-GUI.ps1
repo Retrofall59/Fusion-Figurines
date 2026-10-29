@@ -14,6 +14,10 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+# 29/10/2026 : pour [Microsoft.VisualBasic.Interaction]::InputBox (demander un nouveau nom a
+# Tomyn avant de fusionner - voir Lancer-Traitement, cas "plusieurs figurines dans le meme
+# dossier source").
+Add-Type -AssemblyName Microsoft.VisualBasic
 
 # 27/10/2026 : demande de Tomyn - un mode clair en plus du mode sombre existant (bascule au
 # clic, voir le bouton pres du haut de la fenetre). $THEME reste l'objet UNIQUE utilise partout
@@ -1544,6 +1548,11 @@ function Mettre-A-Jour-LigneGroupe($grp) {
     $grp.NombreTriangles = Calculer-NombreTrianglesInclus $grp
     foreach ($item in $liste.Items) {
         if ($item.Tag -eq $grp) {
+            # 29/10/2026 : ajoute en meme temps que le renommage avant fusion (voir
+            # Lancer-Traitement) - cette fonction ne touchait avant que les colonnes 2-4, jamais
+            # le nom (colonne principale), donc un $grp.Nom change en cours de route ne se
+            # voyait jamais dans le tableau.
+            $item.Text = $grp.Nom
             $nbExclues = if ($grp.PSObject.Properties['PiecesExclues']) { $grp.PiecesExclues.Count } else { 0 }
             $item.SubItems[1].Text = if ($nbExclues -gt 0) { "$($grp.Pieces.Count - $nbExclues)/$($grp.Pieces.Count)" } else { [string]$grp.Pieces.Count }
             $texteTriangles = "{0:N0}" -f $grp.NombreTriangles
@@ -2721,6 +2730,56 @@ function Lancer-Traitement([array]$cibles) {
             [System.Windows.Forms.MessageBox]::Show("Toutes les figurines selectionnees sont deja a jour (sortie plus recente que les pieces source).`n`nDecoche 'Sauter les figurines deja traitees' pour forcer un retraitement complet.", "Fusion figurines")
             return
         }
+    }
+
+    # 29/10/2026 : demande de Tomyn - cas "plusieurs figurines (ex: une figurine + sa base,
+    # une autre figurine + une autre base, etc.) melangees dans le MEME dossier source". Le
+    # scan ne cree qu'UN groupe par dossier (voir boutonScanner.Add_Click) : pour fusionner la
+    # 2e figurine du dossier, Tomyn reutilise ce MEME groupe en changeant juste les pieces
+    # exclues (celles de la 1ere figurine passent exclues, celles de la 2e sont reincluses).
+    # Probleme : la sortie s'appelle toujours "<NomDossier>.stl" des deux cotes - la 2e fusion
+    # ECRASERAIT silencieusement le resultat de la 1ere. On demande donc, quand une fusion AVEC
+    # exclusions va produire un nom de sortie qui existe deja sur le disque, si Tomyn veut
+    # renommer cette fusion-ci avant de continuer. Oui = demande un nom et continue sous ce nom.
+    # Non = cette figurine est ignoree pour ce lot (le temps qu'il decide d'un nom lui-meme).
+    # Limite a "a des exclusions" pour ne jamais interrompre le cas normal (une figurine = un
+    # dossier, reprocessee/ecrasee volontairement sans qu'on lui demande rien).
+    $ciblesApresRenommage = [System.Collections.Generic.List[object]]::new()
+    foreach ($grp in $cibles) {
+        $aDesExclusions = $grp.PSObject.Properties['PiecesExclues'] -and $grp.PiecesExclues.Count -gt 0
+        $cheminStlExistant = Join-Path $dossierSortie "$($grp.Nom).stl"
+        $chemin3mfExistant = Join-Path $dossierSortie "$($grp.Nom).3mf"
+        if ($aDesExclusions -and ((Test-Path $cheminStlExistant) -or (Test-Path $chemin3mfExistant))) {
+            $reponse = [System.Windows.Forms.MessageBox]::Show(
+                "Un resultat '$($grp.Nom).stl' existe deja dans le dossier de sortie.`n`nSi c'est une AUTRE figurine du meme dossier source (plusieurs figurines/bases melangees dans un seul dossier, avec des pieces exclues differentes a chaque fois), renomme cette fusion maintenant pour ne pas ecraser le resultat precedent.`n`nRenommer avant de continuer ?`n(Non = cette figurine est ignoree pour ce lot)",
+                "Fusion figurines - resultat deja existant", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($reponse -eq [System.Windows.Forms.DialogResult]::Yes) {
+                $nouveauNom = [Microsoft.VisualBasic.Interaction]::InputBox("Nouveau nom pour cette fusion (sans extension) :", "Renommer avant fusion", $grp.Nom)
+                $nouveauNom = $nouveauNom.Trim()
+                if ($nouveauNom) {
+                    $ancienNom = $grp.Nom
+                    $grp.Nom = $nouveauNom
+                    Mettre-A-Jour-LigneGroupe $grp
+                    Ajouter-Journal "[$ancienNom] Renommee en '$nouveauNom' avant traitement (evite d'ecraser le resultat existant)."
+                    $ciblesApresRenommage.Add($grp)
+                } else {
+                    Ajouter-Journal "[$($grp.Nom)] Ignoree pour ce lot (renommage annule ou nom vide)."
+                    $grp.Statut = "Ignoree (renommage annule)"
+                    Mettre-A-Jour-LigneGroupe $grp
+                }
+            } else {
+                Ajouter-Journal "[$($grp.Nom)] Ignoree pour ce lot (resultat existant, pas de renommage demande)."
+                $grp.Statut = "Ignoree (resultat existant)"
+                Mettre-A-Jour-LigneGroupe $grp
+            }
+        } else {
+            $ciblesApresRenommage.Add($grp)
+        }
+    }
+    $cibles = @($ciblesApresRenommage)
+    if ($cibles.Count -eq 0) {
+        Ajouter-Journal "Rien a traiter apres renommage/ignore."
+        return
     }
 
     # 27/10/2026 : demande de Tomyn - jusqu'ici, Bambu Studio deja ouvert en arriere-plan ne
