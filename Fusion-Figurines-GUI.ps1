@@ -1410,6 +1410,13 @@ $listePieces.Size = New-Object System.Drawing.Size(220, 160)
 $listePieces.BackColor = $THEME.FondChamp
 $listePieces.ForeColor = $THEME.Texte
 $listePieces.BorderStyle = "FixedSingle"
+# 29/10/2026 : demande de Tomyn - certains noms de pieces sont trop longs pour la largeur fixe
+# de cette liste (220px) et se coupaient sans aucun moyen de voir la fin, rendant impossible de
+# savoir laquelle est laquelle avant de l'exclure. HorizontalScrollbar calcule automatiquement
+# (CheckedListBox n'est pas en dessin personnalise ici) la largeur necessaire au nom le plus
+# long et affiche un ascenseur horizontal des que ca depasse, sans toucher a la taille du
+# panneau lui-meme.
+$listePieces.HorizontalScrollbar = $true
 # 27/10/2026 : CheckOnClick = $true cochait/decochait des qu'on cliquait N'IMPORTE OU sur la
 # ligne (meme juste pour la selectionner/la regarder) - Tomyn veut pouvoir selectionner une
 # piece sans que ca change son exclusion, et ne (dé)cocher QUE quand il clique precisement sur
@@ -1821,6 +1828,115 @@ function Compter-TrianglesSTL([string]$chemin) {
 }
 
 # ============================================================================
+# SUPPORT .OBJ (demande de Tomyn - certains createurs ne fournissent les pieces qu'en .obj,
+# format texte "Wavefront", pas en .stl). Contrairement au .stl binaire, .obj n'a pas d'en-tete
+# donnant le nombre de triangles ni de taille de record fixe permettant de "sauter" directement
+# a un triangle donne (Seek) - on doit forcement lire le fichier ligne par ligne. Les sommets
+# ("v x y z") et les faces ("f i1 i2 i3 ..." - indices 1-based vers les sommets, potentiellement
+# suivis de "/texture/normale" a ignorer, et potentiellement plus de 3 indices pour un polygone
+# non triangulaire - auquel cas on triangule en eventail depuis le premier sommet) sont lus une
+# seule fois ; impossible d'echantillonner AVANT lecture comme pour le .stl binaire.
+# ============================================================================
+function Compter-TrianglesOBJ([string]$chemin) {
+    # Equivalent de Compter-TrianglesSTL pour un .obj : pas d'en-tete a lire, donc on compte les
+    # faces ligne par ligne (StreamReader, jamais tout le fichier en memoire d'un coup) en
+    # tenant compte de la triangulation en eventail (une face a N sommets devient N-2 triangles).
+    try {
+        if (-not (Test-Path $chemin)) { return -1 }
+        $total = 0
+        $lecteur = New-Object System.IO.StreamReader($chemin)
+        try {
+            while (-not $lecteur.EndOfStream) {
+                $ligne = $lecteur.ReadLine()
+                if ($ligne.Length -ge 2 -and $ligne[0] -eq 'f' -and [char]::IsWhiteSpace($ligne[1])) {
+                    $nbSommets = ($ligne.Trim() -split '\s+').Count - 1
+                    if ($nbSommets -ge 3) { $total += ($nbSommets - 2) }
+                }
+            }
+        } finally { $lecteur.Close() }
+        return $total
+    } catch { return -1 }
+}
+
+function Lire-TrianglesOBJEchantillon([string]$cheminFichier, [int]$maxTriangles) {
+    # Pas de raccourci "Seek direct sur le Neme triangle" possible en texte (voir commentaire
+    # plus haut) : on lit TOUS les sommets (necessaires, une face peut referencer n'importe quel
+    # sommet deja vu, pas seulement les precedents) puis on triangule chaque face au fur et a
+    # mesure. L'echantillonnage (budget $maxTriangles) ne reduit donc pas la LECTURE comme pour
+    # le .stl binaire, seulement le nombre de triangles GARDES en memoire pour le rendu/la
+    # fusion - un sur N au lieu de tous, meme principe que la branche ASCII du lecteur .stl.
+    $sommets = [System.Collections.Generic.List[double[]]]::new()
+    $triangles = [System.Collections.Generic.List[object]]::new()
+    $nombreOriginal = 0
+    try {
+        if (-not (Test-Path $cheminFichier)) { return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = 0 } }
+        # Premiere passe : compte total pour calculer le pas d'echantillonnage (coherent avec
+        # Lire-TrianglesSTLEchantillon, qui connait le total via l'en-tete AVANT de lire).
+        $nombreOriginal = Compter-TrianglesOBJ $cheminFichier
+        if ($nombreOriginal -lt 0) { $nombreOriginal = 0 }
+        $pas = [Math]::Max(1, [Math]::Floor($nombreOriginal / [Math]::Max(1, $maxTriangles)))
+        $indexTriangle = -1
+        $lecteur = New-Object System.IO.StreamReader($cheminFichier)
+        try {
+            while (-not $lecteur.EndOfStream) {
+                $ligne = $lecteur.ReadLine()
+                if ($ligne.Length -lt 2) { continue }
+                if ($ligne[0] -eq 'v' -and [char]::IsWhiteSpace($ligne[1])) {
+                    $parties = $ligne.Trim() -split '\s+'
+                    if ($parties.Count -ge 4) {
+                        $sommets.Add([double[]]@([double]$parties[1], [double]$parties[2], [double]$parties[3]))
+                    }
+                } elseif ($ligne[0] -eq 'f' -and [char]::IsWhiteSpace($ligne[1])) {
+                    $jetons = ($ligne.Trim() -split '\s+') | Select-Object -Skip 1
+                    # "i", "i/vt", "i/vt/vn" ou "i//vn" - seul l'indice de SOMMET (avant le
+                    # premier "/" s'il y en a un) nous interesse. Indices 1-based (standard OBJ),
+                    # et negatifs autorises par le format (compte depuis la fin de la liste des
+                    # sommets DEJA lus) - les deux cas sont geres.
+                    $indicesSommets = foreach ($j in $jetons) {
+                        $brut = ($j -split '/')[0]
+                        if ($brut) {
+                            $i = [int]$brut
+                            if ($i -gt 0) { $i - 1 } else { $sommets.Count + $i }
+                        }
+                    }
+                    $indicesSommets = @($indicesSommets)
+                    if ($indicesSommets.Count -ge 3) {
+                        # Triangulation en eventail : sommet 0 commun a tous les triangles de la
+                        # face, puis (1,2), (2,3), ... - correct pour un polygone convexe plan
+                        # (quasi systematique sur ce genre de pieces imprimables), pas garanti
+                        # pour un polygone concave, mais sans alternative moins couteuse sans
+                        # vraie triangulation geometrique.
+                        for ($k = 1; $k -lt $indicesSommets.Count - 1; $k++) {
+                            $indexTriangle++
+                            if (($indexTriangle % $pas) -ne 0) { continue }
+                            if ($triangles.Count -ge $maxTriangles) { continue }
+                            $ia = $indicesSommets[0]; $ib = $indicesSommets[$k]; $ic = $indicesSommets[$k + 1]
+                            if ($ia -ge 0 -and $ia -lt $sommets.Count -and $ib -ge 0 -and $ib -lt $sommets.Count -and $ic -ge 0 -and $ic -lt $sommets.Count) {
+                                $triangles.Add(@{ A = $sommets[$ia]; B = $sommets[$ib]; C = $sommets[$ic] })
+                            }
+                        }
+                    }
+                }
+            }
+        } finally { $lecteur.Close() }
+    } catch { }
+    return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = $nombreOriginal }
+}
+
+# 29/10/2026 : demande de Tomyn - detecte automatiquement .stl vs .obj a partir de l'extension
+# et appelle la bonne paire de fonctions, pour que le reste du code (scan, apercus, fusion
+# locale) n'ait jamais besoin de savoir quel format chaque piece utilise.
+function Compter-TrianglesPiece([string]$chemin) {
+    if ($chemin -match '\.obj$') { return Compter-TrianglesOBJ $chemin }
+    return Compter-TrianglesSTL $chemin
+}
+
+function Lire-TrianglesPieceEchantillon([string]$chemin, [int]$maxTriangles) {
+    if ($chemin -match '\.obj$') { return Lire-TrianglesOBJEchantillon $chemin $maxTriangles }
+    return Lire-TrianglesSTLEchantillon $chemin $maxTriangles
+}
+
+# ============================================================================
 # TOAST (notification non-bloquante, coin bas-droit de la fenetre, auto-fermeture)
 # ============================================================================
 function Afficher-Toast([string]$texte, [int]$dureeMs = 8000) {
@@ -1898,7 +2014,11 @@ $boutonScanner.Add_Click({
     # 26/10/2026 : CAS 1 - le dossier racine CONTIENT LUI-MEME directement les pieces (ex:
     # Tomyn pointe directement sur le dossier d'UNE figurine, pas sur son parent). Dans ce
     # cas on traite le dossier racine lui-meme comme UN groupe.
-    $piecesRacine = Get-ChildItem -Path $champRacine.Text -Filter "*.stl" -File
+    # 29/10/2026 : demande de Tomyn - certaines figurines ne fournissent leurs pieces qu'en
+    # .obj (pas de .stl du tout) - voir Compter-TrianglesPiece/Lire-TrianglesPieceEchantillon
+    # plus haut, qui detectent le format a la volee pour le reste du pipeline. Le scan doit
+    # donc chercher les DEUX extensions, pas juste .stl.
+    $piecesRacine = Get-ChildItem -Path $champRacine.Text -File | Where-Object { $_.Extension -in '.stl', '.obj' }
     if ($piecesRacine.Count -ge 2) {
         $script:Groupes += [PSCustomObject]@{
             Nom = Split-Path $champRacine.Text -Leaf; Dossier = $champRacine.Text; Pieces = $piecesRacine; Statut = "En attente"; CheminSortieStl = $null; DureeSecondes = $null; PiecesExclues = @()
@@ -1915,13 +2035,13 @@ $boutonScanner.Add_Click({
     $sousDossiersIgnores = [System.Collections.Generic.List[string]]::new()
     $sousDossiers = Get-ChildItem -Path $champRacine.Text -Directory
     foreach ($sd in $sousDossiers) {
-        $pieces = Get-ChildItem -Path $sd.FullName -Filter "*.stl" -File
+        $pieces = Get-ChildItem -Path $sd.FullName -File | Where-Object { $_.Extension -in '.stl', '.obj' }
         if ($pieces.Count -ge 2) {
             $script:Groupes += [PSCustomObject]@{
                 Nom = $sd.Name; Dossier = $sd.FullName; Pieces = $pieces; Statut = "En attente"; CheminSortieStl = $null; DureeSecondes = $null; PiecesExclues = @()
             }
         } else {
-            $sousDossiersIgnores.Add("$($sd.Name) ($($pieces.Count) .stl)")
+            $sousDossiersIgnores.Add("$($sd.Name) ($($pieces.Count) .stl/.obj)")
         }
     }
 
@@ -1951,7 +2071,7 @@ $boutonScanner.Add_Click({
         # (voir Calculer-NombreTrianglesInclus) sans avoir a rouvrir les fichiers.
         $trianglesParPiece = @{}
         foreach ($p in $grp.Pieces) {
-            $n = Compter-TrianglesSTL $p.FullName
+            $n = Compter-TrianglesPiece $p.FullName
             if ($n -ge 0) { $total += $n }
             if ($n -le 0) { $piecesSuspectes.Add($p.Name) }
             $trianglesParPiece[$p.Name] = [Math]::Max(0, $n)
@@ -2094,6 +2214,13 @@ function Demarrer-ApercuAsync([string]$cle, [System.Windows.Forms.PictureBox]$pi
     # meme chose que le code principal - pas de copie figee qui risquerait de diverger.
     $defLireSTL = (Get-Item function:Lire-TrianglesSTLEchantillon).Definition
     $defRendre = (Get-Item function:Rendre-ApercuIsometrique).Definition
+    # 29/10/2026 : support .obj (voir Compter-TrianglesPiece/Lire-TrianglesPieceEchantillon
+    # plus haut) - ce runspace a besoin de sa propre copie de ces fonctions aussi, meme
+    # principe de transmission que pour les deux ci-dessus.
+    $defCompterOBJ = (Get-Item function:Compter-TrianglesOBJ).Definition
+    $defLireOBJ = (Get-Item function:Lire-TrianglesOBJEchantillon).Definition
+    $defCompterPiece = (Get-Item function:Compter-TrianglesPiece).Definition
+    $defLirePiece = (Get-Item function:Lire-TrianglesPieceEchantillon).Definition
     # 26/10/2026 : le test a 120000 (x3) etait encore plus lent ET toujours de la "bouillie"
     # - ca confirme que FillPolygon+gonflage etait le vrai probleme (vitesse ET fidelite), pas
     # le budget. Nouveau rendu par sommets (buffer brut, pas d'objets .NET ni d'appel GDI+
