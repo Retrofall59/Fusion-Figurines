@@ -220,7 +220,7 @@ function Lire-TrianglesSTL([string]$cheminFichier) {
 # octets pour le format binaire (on ne decode meme pas les triangles sautes, donc le
 # gain de vitesse est reel, pas juste au niveau de l'affichage).
 # ============================================================================
-function Lire-TrianglesSTLEchantillon([string]$cheminFichier, [int]$maxTriangles) {
+function Lire-TrianglesSTLEchantillon([string]$cheminFichier, [int]$maxTriangles, [hashtable]$EtatAnnulation = $null) {
     # Renvoie un objet { Triangles = <liste echantillonnee>; NombreOriginal = <total reel
     # dans le fichier> } - le nombre original sert ensuite a calculer de combien on doit
     # "gonfler" chaque triangle affiche pour compenser ceux qu'on a sautes (voir
@@ -304,6 +304,18 @@ function Lire-TrianglesSTLEchantillon([string]$cheminFichier, [int]$maxTriangles
                 }
                 $nbCompletsLus = [Math]::Floor($luTotal / 50)
                 for ($i = 0; $i -lt $nbCompletsLus; $i++) {
+                    # 30/10/2026 : CORRECTIF "Arreter" - Tomyn : bouton inoperant pendant la
+                    # fusion locale meme sur un .stl (pas un .obj cette fois). Cette boucle
+                    # (chemin "budget = tous les triangles", donc TOUJOURS celle utilisee pendant
+                    # la vraie fusion, pas l'apercu) construit un objet par triangle - "quasi
+                    # instantane" ne veut pas dire "instantane" sur plusieurs millions d'iterations
+                    # (allocations managees en PowerShell, pas juste de la copie memoire brute).
+                    # Verification toutes les 1 000 000 iterations (ce bloc est bien plus rapide
+                    # par iteration que la lecture ligne par ligne d'un .obj, d'ou un seuil plus
+                    # eleve - reste largement sous la seconde de latence percue).
+                    if (($i % 1000000) -eq 0 -and $EtatAnnulation -and $EtatAnnulation.DoitArreter) {
+                        return [PSCustomObject]@{ Triangles = [System.Collections.Generic.List[object]]::new(); NombreOriginal = 0; Annule = $true }
+                    }
                     $o = $i * 50 + 12
                     $ax = [System.BitConverter]::ToSingle($tamponComplet, $o);      $ay = [System.BitConverter]::ToSingle($tamponComplet, $o + 4);  $az = [System.BitConverter]::ToSingle($tamponComplet, $o + 8)
                     $bx = [System.BitConverter]::ToSingle($tamponComplet, $o + 12); $by = [System.BitConverter]::ToSingle($tamponComplet, $o + 16); $bz = [System.BitConverter]::ToSingle($tamponComplet, $o + 20)
@@ -322,7 +334,12 @@ function Lire-TrianglesSTLEchantillon([string]$cheminFichier, [int]$maxTriangles
                 }
             } else {
                 $tampon = New-Object byte[] 50
+                $compteurVerif = 0
                 for ($i = 0; $i -lt $nbTrianglesAnnonce; $i += $pas) {
+                    $compteurVerif++
+                    if (($compteurVerif % 20000) -eq 0 -and $EtatAnnulation -and $EtatAnnulation.DoitArreter) {
+                        return [PSCustomObject]@{ Triangles = [System.Collections.Generic.List[object]]::new(); NombreOriginal = 0; Annule = $true }
+                    }
                     $posOctet = 84 + ([int64]$i * 50)
                     # Securite : si le nombre de triangles annonce dans l'en-tete est errone
                     # (fichier tronque/mal forme), on ne depasse jamais la fin reelle du fichier.
@@ -351,7 +368,12 @@ function Lire-TrianglesSTLEchantillon([string]$cheminFichier, [int]$maxTriangles
             $lecteur = New-Object System.IO.StreamReader($flux)
             $sommetsCourants = [System.Collections.Generic.List[double[]]]::new()
             $limiteOctets = 300MB
+            $nbLignesAscii = 0
             while (-not $lecteur.EndOfStream -and $triangles.Count -lt $maxTriangles -and $flux.Position -lt $limiteOctets) {
+                $nbLignesAscii++
+                if (($nbLignesAscii % 200000) -eq 0 -and $EtatAnnulation -and $EtatAnnulation.DoitArreter) {
+                    return [PSCustomObject]@{ Triangles = [System.Collections.Generic.List[object]]::new(); NombreOriginal = 0; Annule = $true }
+                }
                 $ligne = $lecteur.ReadLine()
                 $l = $ligne.Trim()
                 if ($l.StartsWith("vertex")) {
@@ -374,7 +396,7 @@ function Lire-TrianglesSTLEchantillon([string]$cheminFichier, [int]$maxTriangles
     } finally {
         $flux.Dispose()
     }
-    return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = $nombreOriginal }
+    return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = $nombreOriginal; Annule = $false }
 }
 
 # ============================================================================
@@ -1960,7 +1982,7 @@ function Compter-TrianglesPiece([string]$chemin, [hashtable]$EtatAnnulation = $n
 
 function Lire-TrianglesPieceEchantillon([string]$chemin, [int]$maxTriangles, [hashtable]$EtatAnnulation = $null) {
     if ($chemin -match '\.obj$') { return Lire-TrianglesOBJEchantillon $chemin $maxTriangles $EtatAnnulation }
-    return Lire-TrianglesSTLEchantillon $chemin $maxTriangles
+    return Lire-TrianglesSTLEchantillon $chemin $maxTriangles $EtatAnnulation
 }
 
 # ============================================================================
@@ -2809,6 +2831,14 @@ function Traiter-UneFigurineCore([string]$nomFigurine, [string[]]$cheminsPieces,
             })
         }
         $triangles.AddRange($lu.Triangles)
+    }
+    # 30/10/2026 : verification supplementaire avant les controles ecart/contact entre pieces
+    # (double boucle sur le nombre de pieces - rapide en soi grace a l'acceleration par grille
+    # de Test-PiecesEnContact, mais sur une figurine a tres nombreuses pieces ca reste une
+    # etape de plus ou "Arreter" doit pouvoir couper avant de lancer Bambu Studio).
+    if ($etatAnnulation -and $etatAnnulation.DoitArreter) {
+        $journalLignes.Add("[$nomFigurine] Traitement arrete par l'utilisateur (avant les controles ecart/contact entre pieces).")
+        return [PSCustomObject]@{ Statut = "Arrete par l'utilisateur"; CheminSortieStl = $null; Journal = $journalLignes }
     }
     if ($boitesParPiece.Count -ge 2) {
         # taille globale approximative (diagonale de la boite qui englobe toutes les pieces),
