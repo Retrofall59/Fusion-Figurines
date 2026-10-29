@@ -1837,17 +1837,29 @@ function Compter-TrianglesSTL([string]$chemin) {
 # non triangulaire - auquel cas on triangule en eventail depuis le premier sommet) sont lus une
 # seule fois ; impossible d'echantillonner AVANT lecture comme pour le .stl binaire.
 # ============================================================================
-function Compter-TrianglesOBJ([string]$chemin) {
+function Compter-TrianglesOBJ([string]$chemin, [hashtable]$EtatAnnulation = $null) {
     # Equivalent de Compter-TrianglesSTL pour un .obj : pas d'en-tete a lire, donc on compte les
     # faces ligne par ligne (StreamReader, jamais tout le fichier en memoire d'un coup) en
     # tenant compte de la triangulation en eventail (une face a N sommets devient N-2 triangles).
+    #
+    # 30/10/2026 : CORRECTIF - Tomyn a signale "Arreter" totalement inoperant sur un gros .obj
+    # (9 millions de points) pendant la fusion locale - normal, RIEN dans cette boucle (ni dans
+    # Lire-TrianglesOBJEchantillon plus bas) ne regardait jamais $etatAnnulation, contrairement
+    # a l'attente de Bambu Studio plus loin dans Traiter-UneFigurineCore qui, elle, le fait deja.
+    # Verification toutes les 200000 lignes (quasi gratuit vis-a-vis du cout de ReadLine() lui-
+    # meme, mais suffisamment frequent pour qu'"Arreter" reagisse en 1-2s max meme sur un enorme
+    # fichier) - -2 (distinct de -1, deja utilise pour une vraie erreur/fichier illisible) signale
+    # une interruption volontaire a l'appelant, qui doit la traiter differemment d'une erreur.
     try {
         if (-not (Test-Path $chemin)) { return -1 }
         $total = 0
+        $nbLignes = 0
         $lecteur = New-Object System.IO.StreamReader($chemin)
         try {
             while (-not $lecteur.EndOfStream) {
                 $ligne = $lecteur.ReadLine()
+                $nbLignes++
+                if (($nbLignes % 200000) -eq 0 -and $EtatAnnulation -and $EtatAnnulation.DoitArreter) { return -2 }
                 if ($ligne.Length -ge 2 -and $ligne[0] -eq 'f' -and [char]::IsWhiteSpace($ligne[1])) {
                     $nbSommets = ($ligne.Trim() -split '\s+').Count - 1
                     if ($nbSommets -ge 3) { $total += ($nbSommets - 2) }
@@ -1858,28 +1870,39 @@ function Compter-TrianglesOBJ([string]$chemin) {
     } catch { return -1 }
 }
 
-function Lire-TrianglesOBJEchantillon([string]$cheminFichier, [int]$maxTriangles) {
+function Lire-TrianglesOBJEchantillon([string]$cheminFichier, [int]$maxTriangles, [hashtable]$EtatAnnulation = $null) {
     # Pas de raccourci "Seek direct sur le Neme triangle" possible en texte (voir commentaire
     # plus haut) : on lit TOUS les sommets (necessaires, une face peut referencer n'importe quel
     # sommet deja vu, pas seulement les precedents) puis on triangule chaque face au fur et a
     # mesure. L'echantillonnage (budget $maxTriangles) ne reduit donc pas la LECTURE comme pour
     # le .stl binaire, seulement le nombre de triangles GARDES en memoire pour le rendu/la
     # fusion - un sur N au lieu de tous, meme principe que la branche ASCII du lecteur .stl.
+    #
+    # 30/10/2026 : CORRECTIF "Arreter" - voir le commentaire sur Compter-TrianglesOBJ. $Annule
+    # (ajoute a l'objet renvoye) permet a l'appelant (Traiter-UneFigurineCore) de distinguer une
+    # interruption volontaire d'une lecture normalement terminee (meme principe que -2 cote
+    # Compter-TrianglesOBJ, mais le type de retour ici est un objet, pas un simple nombre).
     $sommets = [System.Collections.Generic.List[double[]]]::new()
     $triangles = [System.Collections.Generic.List[object]]::new()
     $nombreOriginal = 0
     try {
-        if (-not (Test-Path $cheminFichier)) { return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = 0 } }
+        if (-not (Test-Path $cheminFichier)) { return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = 0; Annule = $false } }
         # Premiere passe : compte total pour calculer le pas d'echantillonnage (coherent avec
         # Lire-TrianglesSTLEchantillon, qui connait le total via l'en-tete AVANT de lire).
-        $nombreOriginal = Compter-TrianglesOBJ $cheminFichier
+        $nombreOriginal = Compter-TrianglesOBJ $cheminFichier $EtatAnnulation
+        if ($nombreOriginal -eq -2) { return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = 0; Annule = $true } }
         if ($nombreOriginal -lt 0) { $nombreOriginal = 0 }
         $pas = [Math]::Max(1, [Math]::Floor($nombreOriginal / [Math]::Max(1, $maxTriangles)))
         $indexTriangle = -1
+        $nbLignes = 0
         $lecteur = New-Object System.IO.StreamReader($cheminFichier)
         try {
             while (-not $lecteur.EndOfStream) {
                 $ligne = $lecteur.ReadLine()
+                $nbLignes++
+                if (($nbLignes % 200000) -eq 0 -and $EtatAnnulation -and $EtatAnnulation.DoitArreter) {
+                    return [PSCustomObject]@{ Triangles = [System.Collections.Generic.List[object]]::new(); NombreOriginal = 0; Annule = $true }
+                }
                 if ($ligne.Length -lt 2) { continue }
                 if ($ligne[0] -eq 'v' -and [char]::IsWhiteSpace($ligne[1])) {
                     $parties = $ligne.Trim() -split '\s+'
@@ -1920,19 +1943,23 @@ function Lire-TrianglesOBJEchantillon([string]$cheminFichier, [int]$maxTriangles
             }
         } finally { $lecteur.Close() }
     } catch { }
-    return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = $nombreOriginal }
+    return [PSCustomObject]@{ Triangles = $triangles; NombreOriginal = $nombreOriginal; Annule = $false }
 }
 
 # 29/10/2026 : demande de Tomyn - detecte automatiquement .stl vs .obj a partir de l'extension
 # et appelle la bonne paire de fonctions, pour que le reste du code (scan, apercus, fusion
 # locale) n'ait jamais besoin de savoir quel format chaque piece utilise.
-function Compter-TrianglesPiece([string]$chemin) {
-    if ($chemin -match '\.obj$') { return Compter-TrianglesOBJ $chemin }
+# 30/10/2026 : $EtatAnnulation (optionnel, $null par defaut - scan/apercu n'en ont pas besoin
+# et continuent de l'appeler sans ce parametre) permet d'interrompre une lecture .obj EN COURS
+# (voir plus haut Compter-TrianglesOBJ/Lire-TrianglesOBJEchantillon) - voir le gros commentaire
+# sur $etatAnnulation dans Traiter-UneFigurineCore pour le pourquoi.
+function Compter-TrianglesPiece([string]$chemin, [hashtable]$EtatAnnulation = $null) {
+    if ($chemin -match '\.obj$') { return Compter-TrianglesOBJ $chemin $EtatAnnulation }
     return Compter-TrianglesSTL $chemin
 }
 
-function Lire-TrianglesPieceEchantillon([string]$chemin, [int]$maxTriangles) {
-    if ($chemin -match '\.obj$') { return Lire-TrianglesOBJEchantillon $chemin $maxTriangles }
+function Lire-TrianglesPieceEchantillon([string]$chemin, [int]$maxTriangles, [hashtable]$EtatAnnulation = $null) {
+    if ($chemin -match '\.obj$') { return Lire-TrianglesOBJEchantillon $chemin $maxTriangles $EtatAnnulation }
     return Lire-TrianglesSTLEchantillon $chemin $maxTriangles
 }
 
@@ -2720,9 +2747,30 @@ function Traiter-UneFigurineCore([string]$nomFigurine, [string[]]$cheminsPieces,
     # le resultat dans Bambu Studio plusieurs minutes plus tard.
     $boitesParPiece = [System.Collections.Generic.List[object]]::new()
     foreach ($cheminPiece in $cheminsPieces) {
-        $nbTri = Compter-TrianglesPiece $cheminPiece
+        # 30/10/2026 : CORRECTIF "Arreter" - Tomyn : "je peux cliquer sur le bouton arreter mais
+        # ca ne fait absolument rien" pendant cette etape. Cause : $etatAnnulation n'etait
+        # verifie NULLE PART ici (ni entre les pieces, ni PENDANT la lecture d'une seule grosse
+        # piece .obj) - seulement plus bas, pendant l'attente du processus Bambu Studio. Verifie
+        # maintenant ICI (entre chaque piece) ET a l'interieur meme de la lecture .obj (voir
+        # Compter-TrianglesOBJ/Lire-TrianglesOBJEchantillon, verification toutes les 200000
+        # lignes) - un .stl n'a pas besoin de cette verification interne, sa lecture "pas=1"
+        # etant un gros bloc memoire deja quasi instantane meme sur plusieurs millions de
+        # triangles (voir Lire-TrianglesSTLEchantillon).
+        if ($etatAnnulation -and $etatAnnulation.DoitArreter) {
+            $journalLignes.Add("[$nomFigurine] Traitement arrete par l'utilisateur (pendant la fusion locale, avant Bambu Studio).")
+            return [PSCustomObject]@{ Statut = "Arrete par l'utilisateur"; CheminSortieStl = $null; Journal = $journalLignes }
+        }
+        $nbTri = Compter-TrianglesPiece $cheminPiece $etatAnnulation
+        if ($nbTri -eq -2) {
+            $journalLignes.Add("[$nomFigurine] Traitement arrete par l'utilisateur (pendant le comptage de '$(Split-Path $cheminPiece -Leaf)').")
+            return [PSCustomObject]@{ Statut = "Arrete par l'utilisateur"; CheminSortieStl = $null; Journal = $journalLignes }
+        }
         if ($nbTri -le 0) { $nbTri = 1 }
-        $lu = Lire-TrianglesPieceEchantillon $cheminPiece ([Math]::Max($nbTri, 1))
+        $lu = Lire-TrianglesPieceEchantillon $cheminPiece ([Math]::Max($nbTri, 1)) $etatAnnulation
+        if ($lu.Annule) {
+            $journalLignes.Add("[$nomFigurine] Traitement arrete par l'utilisateur (pendant la lecture de '$(Split-Path $cheminPiece -Leaf)').")
+            return [PSCustomObject]@{ Statut = "Arrete par l'utilisateur"; CheminSortieStl = $null; Journal = $journalLignes }
+        }
         $minX = [double]::MaxValue; $maxX = [double]::MinValue
         $minY = [double]::MaxValue; $maxY = [double]::MinValue
         $minZ = [double]::MaxValue; $maxZ = [double]::MinValue
